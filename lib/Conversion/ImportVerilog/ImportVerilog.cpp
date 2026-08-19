@@ -532,6 +532,7 @@ void circt::populateLlhdToCorePipeline(
   pm.addNestedPass<hw::HWModuleOp>(llhd::createWrapProceduralOpsPass());
   pm.addPass(mlir::createSCFToControlFlowPass());
   pm.addPass(llhd::createInlineCallsPass());
+  pm.addPass(llhd::createInlineSuspendFreeCoroutinesPass());
   pm.addPass(mlir::createSymbolDCEPass());
 
   // Simplify processes, replace signals with process results, and detect

@@ -4,6 +4,7 @@ add_circt_dialect_library(CIRCTLLHDTransforms
   DeseqUtils.cpp
   HoistSignals.cpp
   InlineCalls.cpp
+  InlineSuspendFreeCoroutines.cpp
   LowerProcesses.cpp
   Mem2Reg.cpp
   RemoveControlFlow.cpp

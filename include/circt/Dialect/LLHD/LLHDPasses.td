@@ -31,6 +31,25 @@ def InlineCallsPass : Pass<"llhd-inline-calls", "ModuleOp"> {
   ];
 }
 
+def InlineSuspendFreeCoroutinesPass
+    : Pass<"llhd-inline-suspend-free-coroutines", "ModuleOp"> {
+  let summary = "Inline LLHD coroutines that cannot suspend";
+  let description = [{
+    Inlines calls to LLHD coroutines that contain at least one `llhd.return`
+    and no wait, halt, or nested coroutine call. Multi-block control flow is
+    cloned into the caller and each return branches to a continuation block.
+    This covers the lowered form of SystemVerilog tasks without timing control
+    while preserving signal drives and their scheduling time. Coroutines that
+    may suspend are left unchanged.
+  }];
+  let statistics = [
+    Statistic<"numInlined", "calls-inlined",
+              "Number of suspend-free coroutine calls inlined">,
+    Statistic<"numErased", "coroutines-erased",
+              "Number of unused coroutine definitions erased">,
+  ];
+}
+
 def Sig2Reg : Pass<"llhd-sig2reg", "hw::HWModuleOp"> {
   let summary = "promote LLHD signals to SSA values";
 
