@@ -168,3 +168,12 @@ hw.bitcast: i216 -> !hw.array<18xi12>
 - 真实 DSC 验证：模块端口聚合类型全部消除；全设计转换目前推进到
   `llhd.process` 内部（含 `llhd.wait` 的时序 process 尚未 lowering，属于下一
   阶段工作）。
+
+## 时序 process lowering（2026-08-19 更新）
+
+- 新增 `llhd-lower-timed-processes`：把"单 wait + 循环状态块"的 llhd.process
+  转成 seq.compreg 寄存器组；next-state 由回到 wait 块的分支条件重建 mux 树；
+  process 体拼接进模块；模块级信号被 process 驱动时转成时钟寄存器（含
+  slice/元素目标的每元素部分写），纯组合驱动则转成 mux 树。
+- 真实 DSC 验证：6 个 process 全部消除；带 bit 级 `sig.extract` 目标驱动的
+  个别信号保留原样并给出明确诊断，属于后续工作。
