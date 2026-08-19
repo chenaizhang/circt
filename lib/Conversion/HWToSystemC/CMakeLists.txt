@@ -10,6 +10,7 @@ add_circt_conversion_library(CIRCTHWToSystemC
   LINK_LIBS PUBLIC
   CIRCTSystemC
   CIRCTHW
+  CIRCTHWTransforms
   CIRCTComb
   CIRCTSeq
   MLIREmitCDialect

@@ -13,12 +13,15 @@
 #include "circt/Conversion/HWToSystemC.h"
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/HW/HWPasses.h"
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "circt/Dialect/SystemC/SystemCOps.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -211,12 +214,24 @@ public:
       StringAttr signalName = rewriter.getStringAttr(
           instanceName.getValue() + "_" + portInfo[i].name.getValue());
 
-      if (auto readOp = input.getDefiningOp<SignalReadOp>()) {
-        // Use the read channel directly without adding an
-        // intermediate signal.
-        rewriter.restoreInsertionPoint(initInsertPt);
-        BindPortOp::create(rewriter, loc, instDecl, portId, readOp.getInput());
-        continue;
+      // Look through materialized conversions and unrealized casts to
+      // recover the read of the channel this input is fed from.
+      Operation *definingOp = input.getDefiningOp();
+      while (definingOp && (isa<ConvertOp>(definingOp) ||
+                            isa<UnrealizedConversionCastOp>(definingOp)))
+        definingOp = definingOp->getOperand(0).getDefiningOp();
+
+      if (auto readOp = dyn_cast_or_null<SignalReadOp>(definingOp)) {
+        // Use the read channel directly without adding an intermediate
+        // signal, unless the channel is a module input port itself. In that
+        // case keep the explicit signal so that the port-to-instance data
+        // path is visible in the module body.
+        if (!llvm::is_contained(scModule.getArguments(), readOp.getInput())) {
+          rewriter.restoreInsertionPoint(initInsertPt);
+          BindPortOp::create(rewriter, loc, instDecl, portId,
+                             readOp.getInput());
+          continue;
+        }
       }
 
       // Otherwise, create an intermediate signal to bind the instance port to.
@@ -264,7 +279,11 @@ public:
       BindPortOp::create(rewriter, loc, instDecl, portId, channel);
       rewriter.setInsertionPoint(instanceOp);
       auto instOut = SignalReadOp::create(rewriter, loc, channel);
-      output.replaceAllUsesWith(instOut);
+      // Convert the read value back to the original integer type, since
+      // operations like comb.* require signless integers.
+      auto converted = typeConverter->materializeSourceConversion(
+          rewriter, loc, instanceOp->getResultTypes()[i], instOut.getResult());
+      output.replaceAllUsesWith(converted ? converted : instOut.getResult());
     }
 
     rewriter.eraseOp(instanceOp);
@@ -569,6 +588,38 @@ std::unique_ptr<OperationPass<ModuleOp>> circt::createConvertHWToSystemCPass() {
 void HWToSystemCPass::runOnOperation() {
   MLIRContext &context = getContext();
   ModuleOp module = getOperation();
+
+  // Prepare the modules for the conversion. The conversion only supports
+  // scalar ports and combinational operations, so flatten aggregate ports,
+  // lower aggregate operations to comb ops, and convert the remaining
+  // bitcasts. Port names use '_' as the join character to keep the generated
+  // C++ identifiers valid.
+  mlir::OpPassManager preparePM("builtin.module");
+  preparePM.addPass(hw::createFlattenIO(hw::FlattenIOOptions{true, false, '_'}));
+  auto &modulePM = preparePM.nestAny();
+  modulePM.addPass(hw::createHWAggregateToComb());
+  preparePM.addPass(hw::createHWConvertBitcasts());
+  // hw-convert-bitcasts may reintroduce aggregate ops, so lower them once
+  // more.
+  preparePM.nestAny().addPass(hw::createHWAggregateToComb());
+  if (failed(runPipeline(preparePM, module)))
+    return signalPassFailure();
+
+  // The aggregate preparation may leave dead bitcasts behind. Erase trivially
+  // dead operations so the full conversion below doesn't trip over them.
+  // (mlir's remove-dead-values pass is not used here: it would replace the
+  // uses of dead values with ub.poison, which the SystemC flow doesn't
+  // support.)
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    module->walk([&](Operation *op) {
+      if (op->use_empty() && mlir::wouldOpBeTriviallyDead(op)) {
+        op->erase();
+        changed = true;
+      }
+    });
+  }
 
   // Create the include operation here to have exactly one 'systemc' include at
   // the top instead of one per module.
