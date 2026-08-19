@@ -85,3 +85,27 @@ hw.module @instance_extern(in %arg0 : i32, in %arg1 : !Struct1, out out : !Struc
   %0:3 = hw.instance "l1" @level1_extern(arg0: %arg0 : i32, in: %arg1 : !Struct1, arg1: %arg0 : i32) -> (out0: i32, out: !Struct1, out1: i32)
   hw.output %0#1 : !Struct1
 }
+
+// Arrays are flattened into element ports, named with index suffixes.
+
+// EXTERN-LABEL: hw.module @array_ports(in %in_0 : i4, in %in_1 : i4, in %in_2 : i4, out out_0 : i4, out out_1 : i4, out out_2 : i4) {
+hw.module @array_ports(in %in : !hw.array<3xi4>, out out: !hw.array<3xi4>) {
+  // EXTERN-NEXT:    hw.output %in_0, %in_1, %in_2 : i4, i4, i4
+  hw.output %in : !hw.array<3xi4>
+}
+
+// EXTERN-LABEL: hw.module @array_child(in %in_0 : i4, in %in_1 : i4, out out_0 : i4, out out_1 : i4) {
+hw.module @array_child(in %in : !hw.array<2xi4>, out out: !hw.array<2xi4>) {
+  // EXTERN-NEXT:    hw.output %in_0, %in_1 : i4, i4
+  hw.output %in : !hw.array<2xi4>
+}
+
+// EXTERN-LABEL: hw.module @array_inst(in %in_0 : i4, in %in_1 : i4, out out_0 : i4, out out_1 : i4) {
+hw.module @array_inst(in %in : !hw.array<2xi4>, out out: !hw.array<2xi4>) {
+  // EXTERN-NEXT:    %child.out_0, %child.out_1 = hw.instance "child" @array_child(in_0: %in_0: i4, in_1: %in_1: i4) -> (out_0: i4, out_1: i4)
+  // EXTERN-NEXT:    %0 = hw.array_create %child.out_1, %child.out_0 : i4
+  // EXTERN:         hw.array_get %0
+  // EXTERN:         hw.output %1, %2 : i4, i4
+  %0 = hw.instance "child" @array_child(in: %in: !hw.array<2xi4>) -> (out: !hw.array<2xi4>)
+  hw.output %0 : !hw.array<2xi4>
+}

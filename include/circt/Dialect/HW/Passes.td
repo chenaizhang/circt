@@ -49,7 +49,8 @@ def IMDeadCodeElim : Pass<"hw-imdce", "mlir::ModuleOp"> {
 }
 
 def FlattenIO : Pass<"hw-flatten-io", "mlir::ModuleOp"> {
-  let summary = "Flattens hw::Structure typed in- and output ports.";
+  let summary = "Flattens hw::Structure and hw::Array typed in- and output "
+                "ports.";
   let options = [
     Option<"recursive", "recursive", "bool", "true",
       "Recursively flatten nested structs.">,
