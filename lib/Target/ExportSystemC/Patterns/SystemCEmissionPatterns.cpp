@@ -23,6 +23,47 @@ using namespace circt::ExportSystemC;
 //===----------------------------------------------------------------------===//
 
 namespace {
+/// Emit a systemc.convert operation as a width-preserving functional cast.
+/// Builtin integers with non-native widths are represented using the matching
+/// SystemC fixed-width integer type so that Comb expressions retain hardware
+/// truncation semantics.
+struct ConvertEmitter : OpEmissionPattern<ConvertOp> {
+  using OpEmissionPattern::OpEmissionPattern;
+
+  MatchResult matchInlinable(Value value) override {
+    if (value.getDefiningOp<ConvertOp>())
+      return Precedence::FUNCTIONAL_CAST;
+    return {};
+  }
+
+  void emitInlined(Value value, EmissionPrinter &p) override {
+    auto op = value.getDefiningOp<ConvertOp>();
+    Type resultType = value.getType();
+
+    if (auto integerType = dyn_cast<IntegerType>(resultType)) {
+      unsigned width = integerType.getWidth();
+      Type inputType = op.getInput().getType();
+      bool isSigned =
+          integerType.isSigned() ||
+          isa<IntType, BigIntType, IntBaseType, SignedType>(inputType);
+      if (width == 1)
+        p << "bool";
+      else if (width <= 64)
+        p << (isSigned ? "sc_int<" : "sc_uint<") << width << ">";
+      else if (width <= 512)
+        p << (isSigned ? "sc_bigint<" : "sc_biguint<") << width << ">";
+      else
+        p << "sc_bv<" << width << ">";
+    } else {
+      p.emitType(resultType);
+    }
+
+    p << "(";
+    p.getInlinable(op.getInput()).emit();
+    p << ")";
+  }
+};
+
 /// Emit a SystemC module using the SC_MODULE macro and emit all ports as fields
 /// of the module. Users of the ports request an expression to be inlined and we
 /// simply return the name of the port.
@@ -88,6 +129,22 @@ struct SignalReadEmitter : OpEmissionPattern<SignalReadOp> {
   void emitInlined(Value value, EmissionPrinter &p) override {
     p.getInlinable(value.getDefiningOp<SignalReadOp>().getInput()).emit();
     p << ".read()";
+  }
+};
+
+/// Emit a positive-edge query on a boolean SystemC channel.
+struct SignalPosedgeEmitter : OpEmissionPattern<SignalPosedgeOp> {
+  using OpEmissionPattern::OpEmissionPattern;
+
+  MatchResult matchInlinable(Value value) override {
+    if (value.getDefiningOp<SignalPosedgeOp>())
+      return Precedence::FUNCTION_CALL;
+    return {};
+  }
+
+  void emitInlined(Value value, EmissionPrinter &p) override {
+    p.getInlinable(value.getDefiningOp<SignalPosedgeOp>().getInput()).emit();
+    p << ".posedge()";
   }
 };
 
@@ -575,17 +632,19 @@ struct DynIntegerTypeEmitter : public TypeEmissionPattern<Ty> {
 
 void circt::ExportSystemC::populateSystemCOpEmitters(
     OpEmissionPatternSet &patterns, MLIRContext *context) {
-  patterns.add<
-      SCModuleEmitter, CtorEmitter, SCFuncEmitter, MethodEmitter, ThreadEmitter,
-      // Signal and port related emitters
-      SignalWriteEmitter, SignalReadEmitter, SignalEmitter, SensitiveEmitter,
-      // Instance-related emitters
-      InstanceDeclEmitter, BindPortEmitter,
-      // CPP-level operation emitters
-      AssignEmitter, VariableEmitter, NewEmitter, DestructorEmitter,
-      DeleteEmitter, MemberAccessEmitter,
-      // Function related emitters
-      FuncEmitter, ReturnEmitter, CallEmitter, CallIndirectEmitter>(context);
+  patterns.add<SCModuleEmitter, CtorEmitter, SCFuncEmitter, MethodEmitter,
+               ThreadEmitter, ConvertEmitter,
+               // Signal and port related emitters
+               SignalWriteEmitter, SignalReadEmitter, SignalPosedgeEmitter,
+               SignalEmitter, SensitiveEmitter,
+               // Instance-related emitters
+               InstanceDeclEmitter, BindPortEmitter,
+               // CPP-level operation emitters
+               AssignEmitter, VariableEmitter, NewEmitter, DestructorEmitter,
+               DeleteEmitter, MemberAccessEmitter,
+               // Function related emitters
+               FuncEmitter, ReturnEmitter, CallEmitter, CallIndirectEmitter>(
+      context);
 }
 
 void circt::ExportSystemC::populateSystemCTypeEmitters(

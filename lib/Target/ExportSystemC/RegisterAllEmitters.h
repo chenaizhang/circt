@@ -16,6 +16,7 @@
 #define CIRCT_TARGET_EXPORTSYSTEMC_REGISTERALLEMITTERS_H
 
 #include "Patterns/BuiltinEmissionPatterns.h"
+#include "Patterns/CombEmissionPatterns.h"
 #include "Patterns/EmitCEmissionPatterns.h"
 #include "Patterns/HWEmissionPatterns.h"
 #include "Patterns/SystemCEmissionPatterns.h"
@@ -27,6 +28,7 @@ namespace ExportSystemC {
 inline void registerAllOpEmitters(OpEmissionPatternSet &patterns,
                                   MLIRContext *context) {
   populateBuiltinOpEmitters(patterns, context);
+  populateCombOpEmitters(patterns, context);
   populateHWEmitters(patterns, context);
   populateSystemCOpEmitters(patterns, context);
   populateEmitCOpEmitters(patterns, context);
