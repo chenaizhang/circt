@@ -25,6 +25,12 @@ namespace hw {
 using namespace mlir;
 using namespace circt;
 
+namespace {
+/// Set by the pass driver for the duration of a run; the array-aware helpers
+/// consult it so that array flattening stays an opt-in behavior.
+bool flattenArraysEnabled = false;
+} // namespace
+
 static bool isStructType(Type type) {
   return isa<hw::StructType>(hw::getCanonicalType(type));
 }
@@ -41,8 +47,10 @@ static hw::ArrayType getArrayType(Type type) {
   return dyn_cast<hw::ArrayType>(hw::getCanonicalType(type));
 }
 
+static bool flattenArrays() { return flattenArraysEnabled; }
+
 static bool isAggregateType(Type type) {
-  return isStructType(type) || isArrayType(type);
+  return isStructType(type) || (flattenArrays() && isArrayType(type));
 }
 
 // Legal if no in- or output type is an aggregate (struct or array).
@@ -68,7 +76,8 @@ static SmallVector<Value> explodeAggregate(OpBuilder &builder, Location loc,
     auto explodeOp = hw::StructExplodeOp::create(
         builder, loc, getInnerTypes(structType), value);
     llvm::copy(explodeOp.getResults(), std::back_inserter(elements));
-  } else if (auto arrayType = getArrayType(value.getType())) {
+  } else if (flattenArrays()) {
+    auto arrayType = getArrayType(value.getType());
     auto indexWidth =
         std::max(1u, llvm::Log2_64_Ceil(arrayType.getNumElements()));
     for (uint64_t i = 0; i < arrayType.getNumElements(); ++i) {
@@ -88,7 +97,7 @@ static Value implodeAggregate(OpBuilder &builder, Location loc, Type type,
   if (auto structType = getStructType(type))
     return hw::StructCreateOp::create(builder, loc, structType, elements)
         .getResult();
-  auto arrayType = getArrayType(type);
+  auto arrayType = flattenArrays() ? getArrayType(type) : hw::ArrayType();
   assert(arrayType && "expected a struct or array type");
   SmallVector<Value> reversed(elements.begin(), elements.end());
   std::reverse(reversed.begin(), reversed.end());
@@ -102,9 +111,10 @@ static SmallVector<std::string> getFlattenedNameSuffixes(Type type) {
   if (auto structType = getStructType(type))
     for (auto field : structType.getElements())
       suffixes.push_back(field.name.getValue().str());
-  else if (auto arrayType = getArrayType(type))
-    for (uint64_t i = 0; i < arrayType.getNumElements(); ++i)
-      suffixes.push_back(std::to_string(i));
+  else if (flattenArrays())
+    if (auto arrayType = getArrayType(type))
+      for (uint64_t i = 0; i < arrayType.getNumElements(); ++i)
+        suffixes.push_back(std::to_string(i));
   return suffixes;
 }
 
@@ -112,8 +122,9 @@ static SmallVector<std::string> getFlattenedNameSuffixes(Type type) {
 static size_t getFlattenedSize(Type type) {
   if (auto structType = getStructType(type))
     return structType.getElements().size();
-  if (auto arrayType = getArrayType(type))
-    return arrayType.getNumElements();
+  if (flattenArrays())
+    if (auto arrayType = getArrayType(type))
+      return arrayType.getNumElements();
   return 1;
 }
 
@@ -208,9 +219,13 @@ struct InstanceOpConversion : public OpConversionPattern<hw::InstanceOp> {
       if (auto structType = getStructType(oldResultType)) {
         for (auto t : structType.getElements())
           newResultTypes.push_back(t.type);
-      } else if (auto arrayType = getArrayType(oldResultType)) {
-        for (uint64_t i = 0; i < arrayType.getNumElements(); ++i)
-          newResultTypes.push_back(arrayType.getElementType());
+      } else if (flattenArrays()) {
+        auto arrayType = getArrayType(oldResultType);
+        if (arrayType)
+          for (uint64_t i = 0; i < arrayType.getNumElements(); ++i)
+            newResultTypes.push_back(arrayType.getElementType());
+        else
+          newResultTypes.push_back(oldResultType);
       } else
         newResultTypes.push_back(oldResultType);
     }
@@ -268,9 +283,13 @@ public:
       if (auto structType = getStructType(type)) {
         for (auto field : structType.getElements())
           results.push_back(field.type);
-      } else if (auto arrayType = getArrayType(type)) {
-        for (uint64_t i = 0; i < arrayType.getNumElements(); ++i)
-          results.push_back(arrayType.getElementType());
+      } else if (flattenArrays()) {
+        auto arrayType = getArrayType(type);
+        if (arrayType)
+          for (uint64_t i = 0; i < arrayType.getNumElements(); ++i)
+            results.push_back(arrayType.getElementType());
+        else
+          results.push_back(type);
       } else
         results.push_back(type);
       return success();
@@ -302,19 +321,22 @@ public:
         return SmallVector<Value>(explodeOp.getResults().begin(),
                                   explodeOp.getResults().end());
       }
-      if (auto arrayType = getArrayType(inputs[0].getType())) {
-        if (arrayType.getNumElements() != resultTypes.size())
-          return SmallVector<Value>();
+      if (flattenArrays()) {
+        if (auto arrayType = getArrayType(inputs[0].getType())) {
+          if (arrayType.getNumElements() != resultTypes.size())
+            return SmallVector<Value>();
         SmallVector<Value> elements;
         auto indexWidth =
             std::max(1u, llvm::Log2_64_Ceil(arrayType.getNumElements()));
-        for (uint64_t i = 0; i < arrayType.getNumElements(); ++i) {
-          auto index = builder.create<hw::ConstantOp>(loc, APInt(indexWidth, i));
-          elements.push_back(
-              hw::ArrayGetOp::create(builder, loc, inputs[0], index)
-                  .getResult());
+          for (uint64_t i = 0; i < arrayType.getNumElements(); ++i) {
+            auto index =
+                builder.create<hw::ConstantOp>(loc, APInt(indexWidth, i));
+            elements.push_back(
+                hw::ArrayGetOp::create(builder, loc, inputs[0], index)
+                    .getResult());
+          }
+          return elements;
         }
-        return elements;
       }
       return SmallVector<Value>();
     });
@@ -341,7 +363,7 @@ public:
       llvm::errs() << "DBG single-alias nIn=" << inputs.size() << " ty=" << type
                    << "\n";
       Value result;
-      if (isArrayType(hw::getCanonicalType(type))) {
+      if (flattenArrays() && isArrayType(hw::getCanonicalType(type))) {
         SmallVector<Value> reversed(inputs.begin(), inputs.end());
         std::reverse(reversed.begin(), reversed.end());
         result = hw::ArrayCreateOp::create(builder, loc, reversed).getResult();
@@ -679,6 +701,7 @@ class FlattenIOPass : public circt::hw::impl::FlattenIOBase<FlattenIOPass> {
 public:
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    flattenArraysEnabled = flattenArrays;
     if (!flattenExtern) {
       // Record the extern modules, do not flatten them.
       for (auto m : module.getOps<hw::HWModuleExternOp>())

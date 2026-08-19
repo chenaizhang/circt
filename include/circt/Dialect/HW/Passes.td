@@ -54,6 +54,9 @@ def FlattenIO : Pass<"hw-flatten-io", "mlir::ModuleOp"> {
   let options = [
     Option<"recursive", "recursive", "bool", "true",
       "Recursively flatten nested structs.">,
+    Option<"flattenArrays", "flatten-arrays", "bool", "false",
+      "Also flatten hw.array ports. Kept off by default for backward "
+      "compatibility; the SystemC conversion enables it.">,
     Option<"flattenExtern", "flatten-extern", "bool", "false",
       "Flatten the extern modules also.">,
     Option<"joinChar", "join-char", "char", "'.'",

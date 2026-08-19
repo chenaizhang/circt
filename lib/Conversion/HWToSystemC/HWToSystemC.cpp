@@ -595,7 +595,8 @@ void HWToSystemCPass::runOnOperation() {
   // bitcasts. Port names use '_' as the join character to keep the generated
   // C++ identifiers valid.
   mlir::OpPassManager preparePM("builtin.module");
-  preparePM.addPass(hw::createFlattenIO(hw::FlattenIOOptions{true, false, '_'}));
+  preparePM.addPass(hw::createFlattenIO(
+      hw::FlattenIOOptions{true, true, false, '_'}));
   auto &modulePM = preparePM.nestAny();
   modulePM.addPass(hw::createHWAggregateToComb());
   preparePM.addPass(hw::createHWConvertBitcasts());
