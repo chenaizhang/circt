@@ -118,6 +118,7 @@ SV frontend/Core IR
 | --- | --- |
 | `circt-opt`、`circt-translate` 增量构建 | 通过 |
 | HW-to-SystemC、SystemC exporter、coroutine 和 SV 前端定向回归 | 10/10 通过 |
+| 完整 `check-circt` 回归 | 通过：1625 项通过、5 项跳过、6 项预期失败 |
 | 生成的组合逻辑 SystemC C++ 语法编译 | 通过 |
 | 生成的时序逻辑 SystemC C++ 语法编译 | 通过 |
 | reset、clock enable、保持和再次采样运行测试 | 通过，输出 `SEQUENTIAL_RUNTIME_OK` |
