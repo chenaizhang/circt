@@ -8,6 +8,7 @@
 
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/Seq/SeqOps.h"
 #include "circt/Dialect/HW/HWPasses.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -205,6 +206,142 @@ struct HWStructExtractOpConversion : OpConversionPattern<hw::StructExtractOp> {
   }
 };
 
+/// Lower a struct explode into one extract per field. The first field
+/// occupies the MSBs, matching the struct_extract lowering.
+struct HWStructExplodeOpConversion : OpConversionPattern<hw::StructExplodeOp> {
+  using OpConversionPattern<hw::StructExplodeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hw::StructExplodeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto structType = cast<hw::StructType>(op.getInput().getType());
+    auto elements = structType.getElements();
+
+    int64_t totalBitWidth = hw::getBitWidth(structType);
+    if (totalBitWidth < 0)
+      return rewriter.notifyMatchFailure(op.getLoc(), "unknown struct width");
+
+    SmallVector<Value> fields;
+    int64_t consumedBits = 0;
+    for (auto element : elements) {
+      int64_t fieldWidth = hw::getBitWidth(element.type);
+      if (fieldWidth < 0)
+        return rewriter.notifyMatchFailure(op.getLoc(), "unknown field width");
+      int64_t bitOffset = totalBitWidth - consumedBits - fieldWidth;
+      fields.push_back(rewriter.createOrFold<comb::ExtractOp>(
+          op.getLoc(), adaptor.getInput(), bitOffset, fieldWidth));
+      consumedBits += fieldWidth;
+    }
+
+    rewriter.replaceOp(op, fields);
+    return success();
+  }
+};
+
+/// Lower a struct inject by rebuilding the struct from its fields, with the
+/// injected field substituted. The first field occupies the MSBs, matching
+/// the struct_extract lowering.
+struct HWStructInjectOpConversion : OpConversionPattern<hw::StructInjectOp> {
+  using OpConversionPattern<hw::StructInjectOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hw::StructInjectOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto structType = cast<hw::StructType>(op.getInput().getType());
+    auto elements = structType.getElements();
+    auto fieldIndex = op.getFieldIndex();
+
+    int64_t totalBitWidth = hw::getBitWidth(structType);
+    if (totalBitWidth < 0)
+      return rewriter.notifyMatchFailure(op.getLoc(), "unknown struct width");
+
+    SmallVector<Value> fields;
+    int64_t consumedBits = 0;
+    for (size_t i = 0; i < elements.size(); ++i) {
+      int64_t fieldWidth = hw::getBitWidth(elements[i].type);
+      if (fieldWidth < 0)
+        return rewriter.notifyMatchFailure(op.getLoc(), "unknown field width");
+      Value field;
+      if (i == fieldIndex) {
+        field = adaptor.getNewValue();
+      } else {
+        int64_t bitOffset = totalBitWidth - consumedBits - fieldWidth;
+        field = rewriter.createOrFold<comb::ExtractOp>(
+            op.getLoc(), adaptor.getInput(), bitOffset, fieldWidth);
+      }
+      fields.push_back(field);
+      consumedBits += fieldWidth;
+    }
+
+    rewriter.replaceOpWithNewOp<comb::ConcatOp>(op, fields);
+    return success();
+  }
+};
+
+/// Lower an array slice into a concat of element extracts. Result element i
+/// holds input element `lowIndex + i`; element 0 sits in the LSBs of the
+/// flattened representation, so the concat is built MSB-first.
+struct HWArraySliceOpConversion : OpConversionPattern<hw::ArraySliceOp> {
+  using OpConversionPattern<hw::ArraySliceOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hw::ArraySliceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto arrayType = cast<hw::ArrayType>(op.getInput().getType());
+    auto resultType = cast<hw::ArrayType>(op.getType());
+    auto elemWidth = hw::getBitWidth(arrayType.getElementType());
+    auto numElements = resultType.getNumElements();
+    auto numInputElements = arrayType.getNumElements();
+    if (elemWidth < 0)
+      return rewriter.notifyMatchFailure(op.getLoc(), "unknown element width");
+
+    Location loc = op.getLoc();
+    Value lowered = adaptor.getInput();
+    Value index = adaptor.getLowIndex();
+
+    // Extract a single element word from the flattened input. With a constant
+    // index this folds to a plain extract; otherwise a mux tree over all
+    // input words selects the requested one.
+    auto getWord = [&](Value idx) -> Value {
+      APInt constantIndex;
+      if (matchPattern(idx, m_ConstantInt(&constantIndex)) &&
+          constantIndex.isSingleWord() &&
+          constantIndex.getZExtValue() < numInputElements) {
+        return rewriter.createOrFold<comb::ExtractOp>(
+            loc, lowered, constantIndex.getZExtValue() * elemWidth, elemWidth);
+      }
+      SmallVector<Value> words;
+      for (uint64_t w = 0; w < numInputElements; ++w)
+        words.push_back(rewriter.createOrFold<comb::ExtractOp>(
+            loc, lowered, w * elemWidth, elemWidth));
+      SmallVector<Value> bits;
+      comb::extractBits(rewriter, idx, bits);
+      return comb::constructMuxTree(rewriter, loc, bits, words, words.back());
+    };
+
+    SmallVector<Value> fields;
+    fields.reserve(numElements);
+    auto idxWidth = index.getType().getIntOrFloatBitWidth();
+    APInt constantBase;
+    bool hasConstantBase = matchPattern(index, m_ConstantInt(&constantBase));
+    for (int64_t i = numElements - 1; i >= 0; --i) {
+      Value idx;
+      if (hasConstantBase) {
+        idx = rewriter.createOrFold<hw::ConstantOp>(
+            loc, APInt(idxWidth, constantBase.getZExtValue() + i));
+      } else {
+        idx = comb::AddOp::create(
+            rewriter, loc, index,
+            rewriter.create<hw::ConstantOp>(loc, APInt(idxWidth, i)), false);
+      }
+      fields.push_back(getWord(idx));
+    }
+
+    rewriter.replaceOpWithNewOp<comb::ConcatOp>(op, fields);
+    return success();
+  }
+};
+
 struct MuxOpConversion : OpConversionPattern<comb::MuxOp> {
   using OpConversionPattern<comb::MuxOp>::OpConversionPattern;
 
@@ -214,6 +351,133 @@ struct MuxOpConversion : OpConversionPattern<comb::MuxOp> {
     // Re-create Mux with legalized types.
     rewriter.replaceOpWithNewOp<comb::MuxOp>(
         op, adaptor.getCond(), adaptor.getTrueValue(), adaptor.getFalseValue());
+    return success();
+  }
+};
+
+/// Enumerate the children of an aggregate type in flattened bit order:
+/// struct field 0 occupies the MSBs; array element 0 sits in the LSBs. For
+/// each child, the offset (from LSB) and width of its bits, plus a name
+/// suffix, are reported.
+static LogicalResult forEachAggregateField(
+    Type type, const std::function<LogicalResult(int64_t, int64_t,
+                                                 const std::string &)> &fn) {
+  if (auto structType = dyn_cast<hw::StructType>(type)) {
+    int64_t totalBitWidth = hw::getBitWidth(structType);
+    int64_t consumedBits = 0;
+    for (auto field : structType.getElements()) {
+      int64_t fieldWidth = hw::getBitWidth(field.type);
+      if (fieldWidth < 0)
+        return failure();
+      int64_t bitOffset = totalBitWidth - consumedBits - fieldWidth;
+      if (failed(fn(bitOffset, fieldWidth, field.name.getValue().str())))
+        return failure();
+      consumedBits += fieldWidth;
+    }
+    return success();
+  }
+  if (auto arrayType = dyn_cast<hw::ArrayType>(type)) {
+    int64_t elemWidth = hw::getBitWidth(arrayType.getElementType());
+    if (elemWidth < 0)
+      return failure();
+    for (uint64_t i = 0; i < arrayType.getNumElements(); ++i) {
+      if (failed(fn(i * elemWidth, elemWidth, std::to_string(i))))
+        return failure();
+    }
+    return success();
+  }
+  return failure();
+}
+
+/// Split a Seq register holding an aggregate value into per-child scalar
+/// registers. The register data is rebuilt with an aggregate create; the next
+/// and reset values are decomposed with bit extracts matching the flattened
+/// bit order of the aggregate.
+template <typename RegTy>
+struct AggregateRegisterConversion : OpConversionPattern<RegTy> {
+  using OpConversionPattern<RegTy>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<RegTy>::OpAdaptor;
+
+  LogicalResult
+  matchAndRewrite(RegTy reg, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto aggType = reg.getType();
+    if (!isa<hw::StructType, hw::ArrayType>(aggType))
+      return rewriter.notifyMatchFailure(reg, "not an aggregate register");
+
+    if constexpr (std::is_same_v<RegTy, seq::FirRegOp>) {
+      if (reg.hasPresetValue())
+        return rewriter.notifyMatchFailure(reg,
+                                           "preset values are not supported");
+    } else {
+      // CompReg ops with a reset are handled by dedicated builders only for
+      // the reset-less form here; DSC does not require them.
+      if (reg.getReset())
+        return rewriter.notifyMatchFailure(
+            reg, "aggregate registers with reset are not supported for this "
+                 "register kind");
+    }
+
+    Location loc = reg.getLoc();
+    SmallVector<Value> children;
+    SmallVector<std::string> suffixes;
+
+    // Decompose next (and reset) values into the scalar children.
+    auto getChild = [&](Value lowered, int64_t offset,
+                        int64_t width) -> Value {
+      return rewriter.createOrFold<comb::ExtractOp>(loc, lowered, offset,
+                                                    width);
+    };
+
+    LogicalResult result = forEachAggregateField(
+        aggType, [&](int64_t offset, int64_t width,
+                     const std::string &suffix) -> LogicalResult {
+      Value nextValue;
+      if constexpr (std::is_same_v<RegTy, seq::FirRegOp>)
+        nextValue = adaptor.getNext();
+      else
+        nextValue = adaptor.getInput();
+      Value next = getChild(nextValue, offset, width);
+
+      Value scalarReg;
+      if constexpr (std::is_same_v<RegTy, seq::CompRegOp>) {
+        scalarReg = rewriter.create<seq::CompRegOp>(loc, next, adaptor.getClk());
+      } else if constexpr (std::is_same_v<RegTy,
+                                          seq::CompRegClockEnabledOp>) {
+        scalarReg = rewriter.create<seq::CompRegClockEnabledOp>(
+            loc, next, adaptor.getClk(), adaptor.getClockEnable(),
+            rewriter.getStringAttr(""));
+      } else {
+        // seq::FirRegOp
+        Value resetValue;
+        if (reg.getReset())
+          resetValue = getChild(adaptor.getResetValue(), offset, width);
+        StringAttr name =
+            reg.getNameAttr() ? rewriter.getStringAttr(
+                                    reg.getNameAttr().getValue() + "_" +
+                                    suffix)
+                              : rewriter.getStringAttr("");
+        scalarReg = rewriter.create<seq::FirRegOp>(
+            loc, next, adaptor.getClk(), name, adaptor.getReset(),
+            resetValue, hw::InnerSymAttr(), reg.getIsAsync(),
+            Attribute());
+      }
+      children.push_back(scalarReg);
+      suffixes.push_back(suffix);
+      return success();
+    });
+    if (failed(result))
+      return failure();
+
+    // Rebuild the aggregate value from the scalar registers.
+    Value imploded;
+    if (isa<hw::StructType>(aggType)) {
+      imploded = hw::StructCreateOp::create(rewriter, loc, aggType, children);
+    } else {
+      SmallVector<Value> reversed(children.rbegin(), children.rend());
+      imploded = hw::ArrayCreateOp::create(rewriter, loc, reversed);
+    }
+    rewriter.replaceOp(reg, imploded);
     return success();
   }
 };
@@ -259,7 +523,11 @@ static void populateHWAggregateToCombOpConversionPatterns(
       HWArrayGetOpConversion, HWArrayCreateLikeOpConversion<hw::ArrayCreateOp>,
       HWArrayCreateLikeOpConversion<hw::ArrayConcatOp>,
       HWAggregateConstantOpConversion, HWArrayInjectOpConversion,
-      HWStructCreateOpConversion, HWStructExtractOpConversion, MuxOpConversion>(
+      HWArraySliceOpConversion, HWStructCreateOpConversion,
+      HWStructExtractOpConversion, HWStructExplodeOpConversion,
+      HWStructInjectOpConversion, AggregateRegisterConversion<seq::CompRegOp>,
+      AggregateRegisterConversion<seq::CompRegClockEnabledOp>,
+      AggregateRegisterConversion<seq::FirRegOp>, MuxOpConversion>(
       typeConverter, patterns.getContext());
 }
 
@@ -274,12 +542,17 @@ struct HWAggregateToCombPass
 void HWAggregateToCombPass::runOnOperation() {
   ConversionTarget target(getContext());
 
-  // TODO: Add ArraySliceOp and struct operatons as well.
   target.addIllegalOp<hw::ArrayGetOp, hw::ArrayCreateOp, hw::ArrayConcatOp,
-                      hw::AggregateConstantOp, hw::ArrayInjectOp,
-                      hw::StructCreateOp, hw::StructExtractOp>();
+                      hw::ArraySliceOp, hw::AggregateConstantOp,
+                      hw::ArrayInjectOp, hw::StructCreateOp,
+                      hw::StructExtractOp, hw::StructExplodeOp,
+                      hw::StructInjectOp>();
   target.addDynamicallyLegalOp<comb::MuxOp>(
       [](comb::MuxOp op) { return hw::type_isa<IntegerType>(op.getType()); });
+  target.addDynamicallyLegalOp<seq::CompRegOp, seq::CompRegClockEnabledOp,
+                               seq::FirRegOp>([](Operation *op) {
+    return !isa<hw::StructType, hw::ArrayType>(op->getResult(0).getType());
+  });
   target.addLegalDialect<hw::HWDialect, comb::CombDialect>();
 
   RewritePatternSet patterns(&getContext());

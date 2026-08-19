@@ -147,3 +147,58 @@ hw.module private @struct_create_extract_roundtrip(in %foo: i3, in %bar: i5, out
   %bar_out = hw.struct_extract %s["bar"] : !hw.struct<foo: i3, bar: i5>
   hw.output %foo_out, %bar_out : i3, i5
 }
+
+// CHECK-LABEL: @struct_explode
+hw.module @struct_explode(in %in: !hw.struct<a: i8, b: i4>, out out: i8) {
+  // CHECK: %[[BITCAST:.+]] = hw.bitcast %in : (!hw.struct<a: i8, b: i4>) -> i12
+  // CHECK: %[[A:.+]] = comb.extract %[[BITCAST]] from 4 : (i12) -> i8
+  // CHECK: %[[B:.+]] = comb.extract %[[BITCAST]] from 0 : (i12) -> i4
+  %a, %b = hw.struct_explode %in : !hw.struct<a: i8, b: i4>
+  hw.output %a : i8
+}
+
+// CHECK-LABEL: @struct_inject
+hw.module @struct_inject(in %in: !hw.struct<a: i8, b: i4>, in %val: i4, out out: !hw.struct<a: i8, b: i4>) {
+  // CHECK: %[[BITCAST:.+]] = hw.bitcast %in : (!hw.struct<a: i8, b: i4>) -> i12
+  // CHECK: %[[A:.+]] = comb.extract %[[BITCAST]] from 4 : (i12) -> i8
+  // CHECK: %[[CAT:.+]] = comb.concat %[[A]], %val : i8, i4
+  // CHECK: %[[OUTBC:.+]] = hw.bitcast %[[CAT]] : (i12) -> !hw.struct<a: i8, b: i4>
+  // CHECK: hw.output %[[OUTBC]] : !hw.struct<a: i8, b: i4>
+  %0 = hw.struct_inject %in["b"], %val : !hw.struct<a: i8, b: i4>
+  hw.output %0 : !hw.struct<a: i8, b: i4>
+}
+
+// CHECK-LABEL: @array_slice
+hw.module @array_slice(in %in: !hw.array<8xi4>, out out: !hw.array<2xi4>) {
+  // CHECK: %[[BITCAST:.+]] = hw.bitcast %in : (!hw.array<8xi4>) -> i32
+  // CHECK: %[[W3:.+]] = comb.extract %[[BITCAST]] from 12 : (i32) -> i4
+  // CHECK: %[[W2:.+]] = comb.extract %[[BITCAST]] from 8 : (i32) -> i4
+  // CHECK: %[[CAT:.+]] = comb.concat %[[W3]], %[[W2]] : i4, i4
+  // CHECK: %[[OUTBC:.+]] = hw.bitcast %[[CAT]] : (i8) -> !hw.array<2xi4>
+  // CHECK: hw.output %[[OUTBC]] : !hw.array<2xi4>
+  %c2_i3 = hw.constant 2 : i3
+  %0 = hw.array_slice %in[%c2_i3] : (!hw.array<8xi4>) -> !hw.array<2xi4>
+  hw.output %0 : !hw.array<2xi4>
+}
+
+// CHECK-LABEL: @array_slice_dynamic
+hw.module @array_slice_dynamic(in %in: !hw.array<4xi4>, in %idx: i2, out out: !hw.array<2xi4>) {
+  // CHECK: %[[BITCAST:.+]] = hw.bitcast %in : (!hw.array<4xi4>) -> i16
+  // CHECK: comb.add
+  // CHECK: comb.mux
+  // CHECK: comb.concat
+  // CHECK-NOT: hw.array_slice
+  %0 = hw.array_slice %in[%idx] : (!hw.array<4xi4>) -> !hw.array<2xi4>
+  hw.output %0 : !hw.array<2xi4>
+}
+
+// CHECK-LABEL: @aggregate_reg
+hw.module @aggregate_reg(in %clk : !seq.clock, in %rst : i1, in %next : !hw.struct<a: i8, b: i4>, out out: i8) {
+  // CHECK: seq.firreg %{{.+}} clock %clk reset sync %rst, %{{.+}} : i8
+  // CHECK: seq.firreg %{{.+}} clock %clk reset sync %rst, %{{.+}} : i4
+  // CHECK: comb.concat
+  // CHECK-NOT: !hw.struct
+  %r = seq.firreg %next clock %clk reset sync %rst, %next : !hw.struct<a: i8, b: i4>
+  %e = hw.struct_extract %r["a"] : !hw.struct<a: i8, b: i4>
+  hw.output %e : i8
+}
