@@ -153,3 +153,18 @@ hw.bitcast: i216 -> !hw.array<18xi12>
 - 超过当前 SystemC 整数类型覆盖范围的超宽运算。
 
 因此，验证报告必须分别给出 HW、Comb、Seq 和 emission 的结果，不应再把所有失败笼统描述为“CIRCT 转换失败”。
+
+## 聚合类型与端口展平（2026-08-19 更新）
+
+- `hw-flatten-io` 现支持数组端口（与 struct 同级），并递归处理嵌套聚合
+  （struct 内嵌数组、数组元素为 struct 等），实例端口名同步更新至每轮结束。
+- `hw-aggregate-to-comb` 新增 `hw.struct_inject`、`hw.struct_explode`、
+  `hw.array_slice`（静态/动态下标）lowering；新增聚合类型 `seq.compreg`/
+  `seq.compreg.ce`/`seq.firreg` 寄存器拆分（按字段拆成标量寄存器，读侧重建聚合）。
+- `convert-hw-to-systemc` 在转换前自动执行
+  `hw-flatten-io → hw-aggregate-to-comb → hw-convert-bitcasts →
+  hw-aggregate-to-comb` 并清理平凡死代码；实例输出物化回整型、输入绑定穿透
+  物化转换。
+- 真实 DSC 验证：模块端口聚合类型全部消除；全设计转换目前推进到
+  `llhd.process` 内部（含 `llhd.wait` 的时序 process 尚未 lowering，属于下一
+  阶段工作）。
