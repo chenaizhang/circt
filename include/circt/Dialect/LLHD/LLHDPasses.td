@@ -142,3 +142,15 @@ def UnrollLoopsPass : Pass<"llhd-unroll-loops", "hw::HWModuleOp"> {
 }
 
 #endif // CIRCT_DIALECT_LLHD_LLHDPASSES_TD
+
+def LowerTimedProcessesPass
+    : Pass<"llhd-lower-timed-processes", "hw::HWModuleOp"> {
+  let summary = "Lower timed LLHD processes to Seq registers";
+  let dependentDialects = ["seq::SeqDialect", "comb::CombDialect"];
+  let description = [{
+    Lowers llhd.process operations with a single llhd.wait into seq.compreg
+    register banks and combinational logic. The process body is spliced into
+    the module; module-level signals driven from the process become clocked
+    registers, and combinationally-driven signals become mux trees.
+  }];
+}
