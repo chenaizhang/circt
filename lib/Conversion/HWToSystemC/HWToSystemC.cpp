@@ -11,14 +11,19 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Conversion/HWToSystemC.h"
-#include "circt/Dialect/Comb/CombDialect.h"
+#include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/Seq/SeqOps.h"
 #include "circt/Dialect/SystemC/SystemCOps.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TypeSwitch.h"
+
+#include <string>
+#include <type_traits>
 
 namespace circt {
 #define GEN_PASS_DEF_CONVERTHWTOSYSTEMC
@@ -267,6 +272,204 @@ public:
   }
 };
 
+/// Remove the Seq clock wrapper after its type has been converted to i1.
+template <typename OpTy>
+struct ConvertClockCast : public OpConversionPattern<OpTy> {
+  using OpConversionPattern<OpTy>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<OpTy>::OpAdaptor;
+
+  LogicalResult
+  matchAndRewrite(OpTy op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, adaptor.getInput());
+    return success();
+  }
+};
+
+/// Walk through the casts introduced for a module input and recover the
+/// SystemC channel that carries a clock.
+static Value findClockChannel(Value value) {
+  while (Operation *definingOp = value.getDefiningOp()) {
+    if (auto convert = dyn_cast<ConvertOp>(definingOp)) {
+      value = convert.getInput();
+      continue;
+    }
+    if (auto toClock = dyn_cast<seq::ToClockOp>(definingOp)) {
+      value = toClock.getInput();
+      continue;
+    }
+    if (auto read = dyn_cast<SignalReadOp>(definingOp))
+      return read.getInput();
+    break;
+  }
+  return {};
+}
+
+static StringAttr getUniqueStateName(SCModuleOp module, StringRef requested,
+                                     Builder &builder) {
+  llvm::StringSet<> names;
+  for (Attribute attr : module.getPortNames())
+    names.insert(cast<StringAttr>(attr).getValue());
+  for (auto nameDecl : module.getBodyBlock()->getOps<SignalOp>())
+    names.insert(nameDecl.getName());
+
+  std::string base = requested.empty() ? "state" : requested.str();
+  base += "_state";
+  std::string candidate = base;
+  for (unsigned suffix = 0; names.contains(candidate); ++suffix)
+    candidate = base + "_" + std::to_string(suffix);
+  return builder.getStringAttr(candidate);
+}
+
+/// Lower a Seq register into a SystemC signal updated from the module's
+/// existing SC_METHOD. The method is sensitive to the state signal as well as
+/// all input ports. A `posedge()` query guards the state update, preserving
+/// simultaneous-register semantics while avoiding a second process and the
+/// associated cross-region cloning of the register's input cone.
+template <typename OpTy>
+struct ConvertCompReg : public OpConversionPattern<OpTy> {
+  using OpConversionPattern<OpTy>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<OpTy>::OpAdaptor;
+
+  LogicalResult
+  matchAndRewrite(OpTy reg, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (reg.getInitialValue())
+      return rewriter.notifyMatchFailure(reg,
+                                         "initial values are not supported");
+
+    auto scModule = reg->template getParentOfType<SCModuleOp>();
+    if (!scModule)
+      return rewriter.notifyMatchFailure(reg, "parent is not an SCModuleOp");
+    auto scFunc = reg->template getParentOfType<SCFuncOp>();
+    if (!scFunc)
+      return rewriter.notifyMatchFailure(reg, "parent is not an SCFuncOp");
+
+    Value clockChannel = findClockChannel(adaptor.getClk());
+    if (!clockChannel)
+      return rewriter.notifyMatchFailure(
+          reg, "clock is not read directly from a SystemC channel");
+
+    Location loc = reg.getLoc();
+    Type stateType = this->getTypeConverter()->convertType(reg.getType());
+    auto signalType = SignalType::get(stateType);
+    StringRef requestedName = reg.getName().value_or("");
+    StringAttr stateName =
+        getUniqueStateName(scModule, requestedName, rewriter);
+
+    auto ctor = scModule.getOrCreateCtor(rewriter);
+    rewriter.setInsertionPoint(ctor);
+    Value state =
+        SignalOp::create(rewriter, loc, signalType, stateName).getSignal();
+
+    // Re-run the method after the signal update delta cycle so combinational
+    // outputs observe the newly committed register value.
+    SensitiveOp sensitivity;
+    for (auto candidate : ctor.getBodyBlock()->template getOps<SensitiveOp>())
+      sensitivity = candidate;
+    if (sensitivity)
+      sensitivity.getSensitivitiesMutable().append(state);
+    else {
+      rewriter.setInsertionPointToStart(ctor.getBodyBlock());
+      SensitiveOp::create(rewriter, loc, ValueRange{state});
+    }
+
+    rewriter.setInsertionPointToStart(scFunc.getBodyBlock());
+    Value stateRead = SignalReadOp::create(rewriter, loc, state);
+    Value current = this->getTypeConverter()->materializeSourceConversion(
+        rewriter, loc, reg.getType(), stateRead);
+
+    rewriter.setInsertionPointToEnd(scFunc.getBodyBlock());
+    Value next = reg.getInput();
+    if constexpr (std::is_same_v<OpTy, seq::CompRegClockEnabledOp>)
+      next = comb::MuxOp::create(rewriter, loc, reg.getClockEnable(), next,
+                                 current);
+    if (reg.getReset())
+      next = comb::MuxOp::create(rewriter, loc, reg.getReset(),
+                                 reg.getResetValue(), next);
+
+    Value posedge = SignalPosedgeOp::create(rewriter, loc, clockChannel);
+    next = comb::MuxOp::create(rewriter, loc, posedge, next, current);
+    Value converted = this->getTypeConverter()->materializeTargetConversion(
+        rewriter, loc, stateType, next);
+    SignalWriteOp::create(rewriter, loc, state, converted);
+
+    rewriter.replaceOp(reg, current);
+    return success();
+  }
+};
+
+/// Lower the FIRRTL-flavored register operation. Synchronous reset is sampled
+/// only on a positive clock edge; asynchronous reset is selected outside the
+/// edge guard so a reset-port event updates the state immediately.
+struct ConvertFirReg : public OpConversionPattern<seq::FirRegOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(seq::FirRegOp reg, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (reg.hasPresetValue())
+      return rewriter.notifyMatchFailure(reg,
+                                         "preset values are not supported");
+
+    auto scModule = reg->getParentOfType<SCModuleOp>();
+    if (!scModule)
+      return rewriter.notifyMatchFailure(reg, "parent is not an SCModuleOp");
+    auto scFunc = reg->getParentOfType<SCFuncOp>();
+    if (!scFunc)
+      return rewriter.notifyMatchFailure(reg, "parent is not an SCFuncOp");
+
+    Value clockChannel = findClockChannel(adaptor.getClk());
+    if (!clockChannel)
+      return rewriter.notifyMatchFailure(
+          reg, "clock is not read directly from a SystemC channel");
+
+    Location loc = reg.getLoc();
+    Type stateType = getTypeConverter()->convertType(reg.getType());
+    auto signalType = SignalType::get(stateType);
+    StringAttr stateName =
+        getUniqueStateName(scModule, reg.getName(), rewriter);
+
+    auto ctor = scModule.getOrCreateCtor(rewriter);
+    rewriter.setInsertionPoint(ctor);
+    Value state =
+        SignalOp::create(rewriter, loc, signalType, stateName).getSignal();
+
+    SensitiveOp sensitivity;
+    for (auto candidate : ctor.getBodyBlock()->getOps<SensitiveOp>())
+      sensitivity = candidate;
+    if (sensitivity)
+      sensitivity.getSensitivitiesMutable().append(state);
+    else {
+      rewriter.setInsertionPointToStart(ctor.getBodyBlock());
+      SensitiveOp::create(rewriter, loc, ValueRange{state});
+    }
+
+    rewriter.setInsertionPointToStart(scFunc.getBodyBlock());
+    Value stateRead = SignalReadOp::create(rewriter, loc, state);
+    Value current = getTypeConverter()->materializeSourceConversion(
+        rewriter, loc, reg.getType(), stateRead);
+
+    rewriter.setInsertionPointToEnd(scFunc.getBodyBlock());
+    Value posedge = SignalPosedgeOp::create(rewriter, loc, clockChannel);
+
+    Value next = reg.getNext();
+    if (reg.getReset() && !reg.getIsAsync())
+      next = comb::MuxOp::create(rewriter, loc, reg.getReset(),
+                                 reg.getResetValue(), next);
+    next = comb::MuxOp::create(rewriter, loc, posedge, next, current);
+    if (reg.getReset() && reg.getIsAsync())
+      next = comb::MuxOp::create(rewriter, loc, reg.getReset(),
+                                 reg.getResetValue(), next);
+
+    Value converted = getTypeConverter()->materializeTargetConversion(
+        rewriter, loc, stateType, next);
+    SignalWriteOp::create(rewriter, loc, state, converted);
+    rewriter.replaceOp(reg, current);
+    return success();
+  }
+};
+
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -279,13 +482,17 @@ static void populateLegality(ConversionTarget &target) {
   target.addLegalDialect<systemc::SystemCDialect>();
   target.addLegalDialect<comb::CombDialect>();
   target.addLegalDialect<emitc::EmitCDialect>();
+  target.addIllegalDialect<seq::SeqDialect>();
   target.addLegalOp<hw::ConstantOp>();
 }
 
 static void populateOpConversion(RewritePatternSet &patterns,
                                  TypeConverter &typeConverter) {
-  patterns.add<ConvertHWModule, ConvertInstance>(typeConverter,
-                                                 patterns.getContext());
+  patterns
+      .add<ConvertHWModule, ConvertInstance, ConvertClockCast<seq::ToClockOp>,
+           ConvertClockCast<seq::FromClockOp>, ConvertCompReg<seq::CompRegOp>,
+           ConvertCompReg<seq::CompRegClockEnabledOp>, ConvertFirReg>(
+          typeConverter, patterns.getContext());
 }
 
 static void populateTypeConversion(TypeConverter &converter) {
@@ -322,6 +529,9 @@ static void populateTypeConversion(TypeConverter &converter) {
     }
 
     return BitVectorType::get(type.getContext(), bw);
+  });
+  converter.addConversion([](seq::ClockType type) -> Type {
+    return IntegerType::get(type.getContext(), 1);
   });
 
   converter.addSourceMaterialization(

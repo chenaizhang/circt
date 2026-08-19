@@ -366,6 +366,16 @@ void SignalOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
 }
 
 //===----------------------------------------------------------------------===//
+// SignalPosedgeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult SignalPosedgeOp::verify() {
+  if (!getSignalBaseType(getInput().getType()).isInteger(1))
+    return emitOpError("requires a boolean input port or signal");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // ConvertOp
 //===----------------------------------------------------------------------===//
 

@@ -74,6 +74,22 @@ def ConvertOp : SystemCOp<"convert", [Pure]> {
   let hasFolder = 1;
 }
 
+def SignalPosedgeOp : SystemCOp<"signal.posedge", [Pure]> {
+  let summary = "Tests whether a boolean channel had a positive edge";
+  let description = [{
+    Represents the `posedge()` query provided by boolean SystemC input ports
+    and signals. This is useful for lowering clocked RTL into an `SC_METHOD`
+    that is sensitive to both its inputs and its internal state.
+
+    The input channel must have `i1` as its base type.
+  }];
+
+  let arguments = (ins AnyTypeOf<[InputType, InOutType, SignalType]>:$input);
+  let results = (outs I1:$result);
+  let assemblyFormat = "$input attr-dict `:` qualified(type($input))";
+  let hasVerifier = 1;
+}
+
 //===----------------------------------------------------------------------===//
 // Operations that model C++-level features.
 //===----------------------------------------------------------------------===//
