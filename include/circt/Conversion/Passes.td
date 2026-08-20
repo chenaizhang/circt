@@ -600,6 +600,11 @@ def ConvertHWToSystemC : Pass<"convert-hw-to-systemc", "mlir::ModuleOp"> {
     This pass translates a HW design into an equivalent SystemC design.
   }];
   let constructor = "circt::createConvertHWToSystemCPass()";
+  let options = [
+    Option<"structureOnly", "structure-only", "bool", "false",
+      "Emit only SystemC modules, ports, instances, bindings, signals, and "
+      "empty SC_METHOD shells. Comb/Seq behavior is intentionally omitted.">,
+  ];
   let dependentDialects = ["systemc::SystemCDialect", "mlir::emitc::EmitCDialect",
                            "seq::SeqDialect"];
 }

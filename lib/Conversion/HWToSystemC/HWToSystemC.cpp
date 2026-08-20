@@ -22,9 +22,14 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include <functional>
+#include <optional>
 #include <string>
 #include <type_traits>
 
@@ -43,6 +48,197 @@ using namespace systemc;
 //===----------------------------------------------------------------------===//
 
 namespace {
+
+static Value canonicalStructureConnection(Value value) {
+  while (Operation *definingOp = value.getDefiningOp()) {
+    if (auto cast = dyn_cast<hw::BitcastOp>(definingOp)) {
+      if (hw::getBitWidth(cast.getInput().getType()) ==
+          hw::getBitWidth(value.getType())) {
+        value = cast.getInput();
+        continue;
+      }
+    }
+    if (auto cast = dyn_cast<UnrealizedConversionCastOp>(definingOp)) {
+      if (cast->getNumOperands() == 1 && cast->getNumResults() == 1) {
+        value = cast->getOperand(0);
+        continue;
+      }
+    }
+    break;
+  }
+  return value;
+}
+
+static StringAttr getCxxIdentifier(StringAttr name, Builder &builder) {
+  std::string result = name.getValue().str();
+  for (char &character : result)
+    if (!llvm::isAlnum(character) && character != '_')
+      character = '_';
+  if (result.empty() || llvm::isDigit(result.front()))
+    result.insert(result.begin(), '_');
+  return builder.getStringAttr(result);
+}
+
+static LogicalResult lowerStructureOnly(ModuleOp module,
+                                        TypeConverter &typeConverter) {
+  SmallVector<HWModuleOp> hwModules;
+  module.walk([&](HWModuleOp hwModule) { hwModules.push_back(hwModule); });
+  OpBuilder builder(module.getContext());
+  llvm::StringMap<SmallVector<systemc::ModuleType::PortInfo>> modulePortInfo;
+  for (HWModuleOp hwModule : hwModules) {
+    auto &info = modulePortInfo[hwModule.getName()];
+    for (const auto &port : hwModule.getPortList()) {
+      Type wrappedType;
+      if (port.isOutput())
+        wrappedType = OutputType::get(port.type);
+      else
+        wrappedType = InputType::get(port.type);
+      Type type = typeConverter.convertType(wrappedType);
+      if (!type)
+        return hwModule.emitError("failed to convert a flattened port type");
+      systemc::ModuleType::PortInfo portInfo;
+      portInfo.type = type;
+      portInfo.name = port.name;
+      info.push_back(portInfo);
+    }
+  }
+
+  for (HWModuleOp hwModule : hwModules) {
+    if (!hwModule.getParameters().empty())
+      return hwModule.emitError("module parameters not supported yet");
+
+    auto ports = hwModule.getPortList();
+    if (llvm::any_of(ports, [](auto &port) { return port.isInOut(); }))
+      return hwModule.emitError("inout arguments not supported yet");
+    for (auto &port : ports) {
+      port.type = typeConverter.convertType(port.type);
+      if (!port.type)
+        return hwModule.emitError("failed to convert a flattened port type");
+    }
+
+    builder.setInsertionPoint(hwModule);
+    auto scModule = SCModuleOp::create(builder, hwModule.getLoc(),
+                                       hwModule.getNameAttr(), ports);
+    scModule.setVisibility(hwModule.getVisibility());
+    auto portAttrs = hwModule.getAllPortAttrs();
+    if (!portAttrs.empty())
+      scModule.setAllArgAttrs(portAttrs);
+
+    builder.setInsertionPointToStart(scModule.getBodyBlock());
+    auto innerLogic = SCFuncOp::create(builder, hwModule.getLoc(),
+                                       builder.getStringAttr("innerLogic"));
+    auto ctor = scModule.getOrCreateCtor(builder);
+    builder.setInsertionPointToStart(ctor.getBodyBlock());
+    MethodOp::create(builder, hwModule.getLoc(), innerLogic.getHandle());
+
+    DenseMap<Value, Value> channels;
+    unsigned blockArgument = 0;
+    for (auto [port, scArgument] : llvm::zip(ports, scModule.getArguments())) {
+      if (port.isOutput())
+        continue;
+      channels[canonicalStructureConnection(
+          hwModule.getBodyBlock()->getArgument(blockArgument++))] = scArgument;
+    }
+    auto outputOp = cast<OutputOp>(hwModule.getBodyBlock()->getTerminator());
+    llvm::SmallDenseSet<Value> instanceInputs;
+    for (InstanceOp instance : hwModule.getBodyBlock()->getOps<InstanceOp>())
+      for (Value input : instance.getInputs())
+        instanceInputs.insert(canonicalStructureConnection(input));
+    unsigned outputIndex = 0;
+    for (auto [port, scArgument] : llvm::zip(ports, scModule.getArguments())) {
+      if (!port.isOutput())
+        continue;
+      Value source =
+          canonicalStructureConnection(outputOp.getOperand(outputIndex++));
+      if (!instanceInputs.contains(source))
+        channels.try_emplace(source, scArgument);
+    }
+
+    unsigned signalIndex = 0;
+    auto getChannel = [&](Value connection, Type baseType) -> Value {
+      connection = canonicalStructureConnection(connection);
+      if (auto found = channels.find(connection); found != channels.end())
+        return found->second;
+      builder.setInsertionPoint(ctor);
+      auto name = builder.getStringAttr("net_" + std::to_string(signalIndex++));
+      Value signal = SignalOp::create(builder, hwModule.getLoc(),
+                                      SignalType::get(baseType), name);
+      channels[connection] = signal;
+      return signal;
+    };
+
+    for (InstanceOp instance : llvm::make_early_inc_range(
+             hwModule.getBodyBlock()->getOps<InstanceOp>())) {
+      auto infoIt = modulePortInfo.find(instance.getModuleName());
+      if (infoIt == modulePortInfo.end())
+        return instance.emitError(
+            "referenced module declaration was not found");
+      auto &portInfo = infoIt->second;
+      auto findPort = [&](Attribute name) -> std::optional<unsigned> {
+        for (auto [index, info] : llvm::enumerate(portInfo))
+          if (info.name == name)
+            return index;
+        return std::nullopt;
+      };
+
+      builder.setInsertionPoint(ctor);
+      auto declaration = InstanceDeclOp::create(
+          builder, instance.getLoc(),
+          getCxxIdentifier(instance.getInstanceNameAttr(), builder),
+          instance.getModuleNameAttr(), portInfo);
+      for (auto [input, name] :
+           llvm::zip(instance.getInputs(), instance.getArgNames())) {
+        auto portIndex = findPort(name);
+        if (!portIndex)
+          return instance.emitError("input port was not found in its module");
+        Type baseType = getSignalBaseType(portInfo[*portIndex].type);
+        Value channel = getChannel(input, baseType);
+        builder.setInsertionPointToEnd(ctor.getBodyBlock());
+        BindPortOp::create(builder, instance.getLoc(), declaration,
+                           builder.getIndexAttr(*portIndex), channel);
+      }
+      for (auto [output, name] :
+           llvm::zip(instance.getResults(), instance.getResultNames())) {
+        auto portIndex = findPort(name);
+        if (!portIndex)
+          return instance.emitError("output port was not found in its module");
+        Type baseType = getSignalBaseType(portInfo[*portIndex].type);
+        Value channel = getChannel(output, baseType);
+        builder.setInsertionPointToEnd(ctor.getBodyBlock());
+        BindPortOp::create(builder, instance.getLoc(), declaration,
+                           builder.getIndexAttr(*portIndex), channel);
+      }
+    }
+    hwModule.erase();
+  }
+
+  llvm::StringMap<SCModuleOp> modulesByName;
+  SmallVector<SCModuleOp> scModules;
+  module.walk([&](SCModuleOp scModule) {
+    modulesByName[scModule.getModuleName()] = scModule;
+    scModules.push_back(scModule);
+  });
+  llvm::StringSet<> visited;
+  SmallVector<SCModuleOp> orderedModules;
+  std::function<void(SCModuleOp)> visit = [&](SCModuleOp scModule) {
+    if (!visited.insert(scModule.getModuleName()).second)
+      return;
+    for (InstanceDeclOp instance :
+         scModule.getBodyBlock()->getOps<InstanceDeclOp>())
+      if (auto child = modulesByName.find(instance.getModuleName());
+          child != modulesByName.end())
+        visit(child->second);
+    orderedModules.push_back(scModule);
+  };
+  for (SCModuleOp scModule : scModules)
+    visit(scModule);
+  for (SCModuleOp scModule : orderedModules)
+    scModule->moveBefore(module.getBody(), module.getBody()->end());
+
+  builder.setInsertionPointToStart(module.getBody());
+  emitc::IncludeOp::create(builder, module.getLoc(), "systemc.h", true);
+  return success();
+}
 
 /// This works on each HW module, creates corresponding SystemC modules, moves
 /// the body of the module into the new SystemC module by splitting up the body
@@ -595,16 +791,26 @@ void HWToSystemCPass::runOnOperation() {
   // bitcasts. Port names use '_' as the join character to keep the generated
   // C++ identifiers valid.
   mlir::OpPassManager preparePM("builtin.module");
-  preparePM.addPass(hw::createFlattenIO(
-      hw::FlattenIOOptions{true, true, false, '_'}));
-  auto &modulePM = preparePM.nestAny();
-  modulePM.addPass(hw::createHWAggregateToComb());
-  preparePM.addPass(hw::createHWConvertBitcasts());
-  // hw-convert-bitcasts may reintroduce aggregate ops, so lower them once
-  // more.
-  preparePM.nestAny().addPass(hw::createHWAggregateToComb());
+  preparePM.addPass(
+      hw::createFlattenIO(hw::FlattenIOOptions{true, true, false, '_'}));
+  if (!structureOnly) {
+    auto &modulePM = preparePM.nestAny();
+    modulePM.addPass(hw::createHWAggregateToComb());
+    preparePM.addPass(hw::createHWConvertBitcasts());
+    // hw-convert-bitcasts may reintroduce aggregate ops, so lower them once
+    // more.
+    preparePM.nestAny().addPass(hw::createHWAggregateToComb());
+  }
   if (failed(runPipeline(preparePM, module)))
     return signalPassFailure();
+
+  if (structureOnly) {
+    TypeConverter typeConverter;
+    populateTypeConversion(typeConverter);
+    if (failed(lowerStructureOnly(module, typeConverter)))
+      signalPassFailure();
+    return;
+  }
 
   // The aggregate preparation may leave dead bitcasts behind. Erase trivially
   // dead operations so the full conversion below doesn't trip over them.

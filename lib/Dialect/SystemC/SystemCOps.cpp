@@ -207,7 +207,7 @@ void SCModuleOp::print(OpAsmPrinter &p) {
   mlir::function_interface_impl::printFunctionAttributes(
       p, *this,
       {"portNames", getFunctionTypeAttrName(), getArgAttrsAttrName(),
-       getResAttrsAttrName()});
+       getResAttrsAttrName(), visibilityAttrName});
 
   p << ' ';
   p.printRegion(getBody(), false, false);

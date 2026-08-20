@@ -325,7 +325,7 @@ struct InstanceDeclEmitter : OpEmissionPattern<InstanceDeclOp> {
 
   void emitStatement(InstanceDeclOp op, EmissionPrinter &p) override {
     p.emitType(op.getInstanceType());
-    p << " " << op.getName() << ";\n";
+    p << " " << op.getName() << "{\"" << op.getName() << "\"};\n";
   }
 };
 } // namespace

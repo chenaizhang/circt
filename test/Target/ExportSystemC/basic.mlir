@@ -31,7 +31,7 @@ systemc.module @basic (%port0: !systemc.in<i1>, %port1: !systemc.inout<!systemc.
   %sig = systemc.signal : !systemc.signal<!systemc.uint<64>>
   // CHECK-NEXT: sc_signal<sc_uint<32>> channel;
   %channel = systemc.signal : !systemc.signal<!systemc.uint<32>>
-  // CHECK-NEXT: submodule submoduleInstance;
+  // CHECK-NEXT: submodule submoduleInstance{"submoduleInstance"};
   %submoduleInstance = systemc.instance.decl @submodule : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<32>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<32>>)>
   // CHECK-NEXT: uint32_t testvar;
   %testvar = systemc.cpp.variable : i32
