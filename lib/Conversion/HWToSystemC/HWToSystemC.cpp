@@ -513,6 +513,12 @@ static Value findClockChannel(Value value) {
       value = toClock.getInput();
       continue;
     }
+    if (auto cast = dyn_cast<UnrealizedConversionCastOp>(definingOp)) {
+      if (cast->getNumOperands() != 1)
+        break;
+      value = cast->getOperand(0);
+      continue;
+    }
     if (auto read = dyn_cast<SignalReadOp>(definingOp))
       return read.getInput();
     break;

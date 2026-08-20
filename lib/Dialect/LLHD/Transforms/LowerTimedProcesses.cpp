@@ -24,6 +24,7 @@
 #include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/LLHD/LLHDPasses.h"
 #include "circt/Dialect/Seq/SeqOps.h"
+#include "circt/Dialect/Sim/SimOps.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
@@ -104,6 +105,158 @@ struct DriveInfo {
   Value condition;
 };
 
+static std::optional<std::pair<Value, ValueRange>>
+getIncomingEdge(Block *predecessor, Block *target, OpBuilder &builder,
+                Location loc, const BlockConditions &blockConds) {
+  Value predecessorCondition = blockConds.getCondition(predecessor);
+  if (!predecessorCondition)
+    return std::nullopt;
+  if (auto branch = dyn_cast<cf::BranchOp>(predecessor->getTerminator())) {
+    if (branch.getDest() != target)
+      return std::nullopt;
+    return std::make_pair(predecessorCondition, branch.getDestOperands());
+  }
+  auto branch = dyn_cast<cf::CondBranchOp>(predecessor->getTerminator());
+  if (!branch)
+    return std::nullopt;
+  if (branch.getTrueDest() == target)
+    return std::make_pair(
+        comb::AndOp::create(builder, loc, predecessorCondition,
+                            branch.getCondition(), true)
+            .getResult(),
+        branch.getTrueDestOperands());
+  if (branch.getFalseDest() == target) {
+    Value notCondition = comb::XorOp::create(
+        builder, loc, branch.getCondition(), constTrue(builder, loc), true);
+    return std::make_pair(
+        comb::AndOp::create(builder, loc, predecessorCondition, notCondition,
+                            true)
+            .getResult(),
+        branch.getFalseDestOperands());
+  }
+  return std::nullopt;
+}
+
+static LogicalResult replaceIntermediateBlockArguments(
+    llhd::ProcessOp process, Block *waitBlock, Block *dest,
+    const BlockConditions &blockConds, OpBuilder &builder) {
+  Location loc = process.getLoc();
+  for (Block &block : process.getBody()) {
+    if (&block == &process.getBody().front() || &block == waitBlock ||
+        &block == dest || block.getNumArguments() == 0)
+      continue;
+    SmallVector<std::pair<Value, ValueRange>> incoming;
+    for (Block *predecessor : block.getPredecessors())
+      if (auto edge =
+              getIncomingEdge(predecessor, &block, builder, loc, blockConds))
+        incoming.push_back(*edge);
+    if (incoming.empty())
+      return process.emitOpError("intermediate block has no incoming value");
+    for (auto argument : llvm::enumerate(block.getArguments())) {
+      Value value;
+      for (auto &[condition, operands] : incoming) {
+        if (argument.index() >= operands.size())
+          return process.emitOpError(
+              "intermediate branch operand count mismatch");
+        Value incomingValue = operands[argument.index()];
+        if (incomingValue.getType() != argument.value().getType())
+          return process.emitOpError(
+              "intermediate branch operand type mismatch");
+        if (value)
+          value = comb::MuxOp::create(builder, loc, condition, incomingValue,
+                                      value);
+        else
+          value = incomingValue;
+      }
+      argument.value().replaceAllUsesWith(value);
+    }
+  }
+  return success();
+}
+
+static LogicalResult lowerCombinational(
+    llhd::CombinationalOp combinational,
+    DenseMap<Operation *, DriveInfo> &driveInfos) {
+  Location loc = combinational.getLoc();
+  OpBuilder builder(combinational);
+  BlockConditions blockConds;
+  Block *entry = &combinational.getBody().front();
+  if (failed(blockConds.compute(nullptr, entry, builder, loc)))
+    return combinational.emitOpError("failed to compute block conditions");
+
+  for (Block &block : combinational.getBody()) {
+    if (&block == entry || block.getNumArguments() == 0)
+      continue;
+    SmallVector<std::pair<Value, ValueRange>> incoming;
+    for (Block *predecessor : block.getPredecessors())
+      if (auto edge =
+              getIncomingEdge(predecessor, &block, builder, loc, blockConds))
+        incoming.push_back(*edge);
+    if (incoming.empty())
+      return combinational.emitOpError(
+          "combinational block has no incoming value");
+    for (auto argument : llvm::enumerate(block.getArguments())) {
+      Value value;
+      for (auto &[condition, operands] : incoming) {
+        if (argument.index() >= operands.size())
+          return combinational.emitOpError(
+              "combinational branch operand count mismatch");
+        Value incomingValue = operands[argument.index()];
+        if (incomingValue.getType() != argument.value().getType())
+          return combinational.emitOpError(
+              "combinational branch operand type mismatch");
+        if (value)
+          value = comb::MuxOp::create(builder, loc, condition, incomingValue,
+                                      value);
+        else
+          value = incomingValue;
+      }
+      argument.value().replaceAllUsesWith(value);
+    }
+  }
+
+  llhd::YieldOp yield;
+  for (Block &block : combinational.getBody())
+    if (auto candidate = dyn_cast<llhd::YieldOp>(block.getTerminator())) {
+      if (yield)
+        return combinational.emitOpError("multiple yields are not supported");
+      yield = candidate;
+    }
+  if (!yield ||
+      yield.getYieldOperands().size() != combinational.getNumResults())
+    return combinational.emitOpError("missing or mismatched yield");
+  SmallVector<Value> replacements(yield.getYieldOperands());
+
+  for (Block &block : llvm::make_early_inc_range(combinational.getBody())) {
+    Value blockCondition = blockConds.getCondition(&block);
+    if (!blockCondition)
+      blockCondition = constTrue(builder, loc);
+    for (Operation &op : llvm::make_early_inc_range(block)) {
+      if (op.hasTrait<OpTrait::IsTerminator>()) {
+        op.erase();
+        continue;
+      }
+      if (auto drive = dyn_cast<llhd::DriveOp>(&op)) {
+        Value enable = blockCondition;
+        if (drive.getEnable())
+          enable = comb::AndOp::create(builder, drive.getLoc(), enable,
+                                       drive.getEnable(), true);
+        builder.setInsertionPoint(combinational);
+        auto movedDrive = llhd::DriveOp::create(
+            builder, drive.getLoc(), drive.getSignal(), drive.getValue(),
+            drive.getTime(), enable);
+        driveInfos[movedDrive] = {Value(), enable};
+        drive.erase();
+        continue;
+      }
+      op.moveBefore(combinational);
+    }
+  }
+  combinational.replaceAllUsesWith(replacements);
+  combinational.erase();
+  return success();
+}
+
 /// Lower one process into a register bank and splice its body into the
 /// module. Returns the clock used by the process, or null on failure.
 static Value lowerProcess(llhd::ProcessOp process,
@@ -140,6 +293,9 @@ static Value lowerProcess(llhd::ProcessOp process,
     process.emitOpError("failed to compute block conditions");
     return {};
   }
+  if (failed(replaceIntermediateBlockArguments(process, waitBlock, dest,
+                                                blockConds, builder)))
+    return {};
 
   // Create the state registers. The branches back to the wait block carry
   // one operand per yield position; extra yielded values that are not block
@@ -269,6 +425,16 @@ static Value lowerProcess(llhd::ProcessOp process,
         op.erase();
         continue;
       }
+      if (auto print = dyn_cast<sim::PrintFormattedProcOp>(&op)) {
+        Value condition = blockConds.getCondition(&block);
+        if (!condition)
+          condition = constTrue(builder, loc);
+        builder.setInsertionPoint(process);
+        sim::PrintFormattedOp::create(builder, print.getLoc(), print.getInput(),
+                                      clock, condition, print.getStream());
+        print.erase();
+        continue;
+      }
       op.moveBefore(process);
       if (auto drive = dyn_cast<llhd::DriveOp>(&op)) {
         Value cond = blockConds.getCondition(&block);
@@ -282,9 +448,6 @@ static Value lowerProcess(llhd::ProcessOp process,
       for (auto [arg, value] :
            llvm::zip(block.getArguments(), wait.getDestOperands()))
         arg.replaceAllUsesWith(value);
-    } else {
-      for (auto [arg, reg] : llvm::zip(block.getArguments(), registers))
-        arg.replaceAllUsesWith(reg);
     }
   }
 
@@ -318,12 +481,16 @@ static Value lowerProcess(llhd::ProcessOp process,
   return clock;
 }
 
-/// Rewrite one use of a signal into an access of the replacement value.
-static void replaceSignalUse(OpBuilder &builder, Operation *user,
-                             llhd::SignalOp sig, Value replacement) {
+/// Rewrite one read-side use of an LLHD reference into an access of an SSA
+/// replacement value. Alias chains are followed recursively; drive-side uses
+/// are kept until the caller has folded their partial-write semantics.
+static void replaceReferenceUse(OpBuilder &builder, Operation *user,
+                                Value reference, Value replacement) {
   builder.setInsertionPoint(user);
   Location loc = user->getLoc();
 
+  if (isa<llhd::DriveOp>(user))
+    return;
   if (auto probe = dyn_cast<llhd::ProbeOp>(user)) {
     probe.replaceAllUsesWith(replacement);
     probe->erase();
@@ -333,34 +500,126 @@ static void replaceSignalUse(OpBuilder &builder, Operation *user,
     auto newSlice = hw::ArraySliceOp::create(builder, loc, nestedType,
                                              replacement,
                                              slice.getLowIndex());
-    // Drives targeting the slice carry partial-write semantics that this
-    // lowering does not model; leave those uses untouched so the signal is
-    // diagnosed instead of corrupted. Nested sig accesses of the slice are
-    // rewritten to hw accesses of the new slice.
     for (auto *sliceUser : llvm::make_early_inc_range(slice->getUsers())) {
-      if (isa<llhd::DriveOp>(sliceUser))
-        continue;
-      if (auto nestedGet = dyn_cast<llhd::SigArrayGetOp>(sliceUser)) {
-        auto newGet = builder.create<hw::ArrayGetOp>(
-            loc, newSlice.getResult(), nestedGet.getIndex());
-        nestedGet.replaceAllUsesWith(newGet.getResult());
-        nestedGet->erase();
-        continue;
-      }
-      sliceUser->replaceUsesOfWith(slice, newSlice.getResult());
+      replaceReferenceUse(builder, sliceUser, slice.getResult(),
+                          newSlice.getResult());
     }
-    slice->erase();
+    if (slice->use_empty())
+      slice->erase();
   } else if (auto get = dyn_cast<llhd::SigArrayGetOp>(user)) {
     auto newGet = builder.create<hw::ArrayGetOp>(loc, replacement,
                                                  get.getIndex());
-    get.replaceAllUsesWith(newGet.getResult());
-    get->erase();
+    for (Operation *getUser : llvm::make_early_inc_range(get->getUsers()))
+      replaceReferenceUse(builder, getUser, get.getResult(),
+                          newGet.getResult());
+    if (get->use_empty())
+      get->erase();
+  } else if (auto extract = dyn_cast<llhd::SigStructExtractOp>(user)) {
+    auto newExtract = builder.create<hw::StructExtractOp>(
+        loc, replacement, extract.getFieldAttr());
+    for (Operation *extractUser :
+         llvm::make_early_inc_range(extract->getUsers()))
+      replaceReferenceUse(builder, extractUser, extract.getResult(),
+                          newExtract.getResult());
+    if (extract->use_empty())
+      extract->erase();
+  } else if (auto extract = dyn_cast<llhd::SigExtractOp>(user)) {
+    auto nestedType = cast<llhd::RefType>(extract.getType()).getNestedType();
+    auto shifted = builder.create<comb::ShrUOp>(
+        loc, replacement, extract.getLowBit());
+    auto newExtract = builder.create<comb::ExtractOp>(
+        loc, nestedType, shifted, 0);
+    for (Operation *extractUser :
+         llvm::make_early_inc_range(extract->getUsers()))
+      replaceReferenceUse(builder, extractUser, extract.getResult(),
+                          newExtract.getResult());
+    if (extract->use_empty())
+      extract->erase();
   } else {
     // Fallback: replace the signal operand directly.
     for (unsigned i = 0; i < user->getNumOperands(); ++i)
-      if (user->getOperand(i) == sig)
+      if (user->getOperand(i) == reference)
         user->setOperand(i, replacement);
   }
+}
+
+static void replaceSignalUse(OpBuilder &builder, Operation *user,
+                             llhd::SignalOp sig, Value replacement) {
+  replaceReferenceUse(builder, user, sig.getResult(), replacement);
+}
+
+/// Return the module-level signal reached through an LLHD reference slice.
+/// ImportVerilog commonly drives an aggregate through one or more
+/// `llhd.sig.*` aliases.  Treating only a direct `llhd.sig` operand as a drive
+/// loses those partial writes and leaves aggregate materialization bitcasts
+/// behind later in the HW-to-SystemC pipeline.
+static llhd::SignalOp getRootSignal(Value reference) {
+  while (Operation *definingOp = reference.getDefiningOp()) {
+    if (auto signal = dyn_cast<llhd::SignalOp>(definingOp))
+      return signal;
+    if (auto slice = dyn_cast<llhd::SigArraySliceOp>(definingOp)) {
+      reference = slice.getInput();
+      continue;
+    }
+    if (auto get = dyn_cast<llhd::SigArrayGetOp>(definingOp)) {
+      reference = get.getInput();
+      continue;
+    }
+    if (auto extract = dyn_cast<llhd::SigStructExtractOp>(definingOp)) {
+      reference = extract.getInput();
+      continue;
+    }
+    if (auto extract = dyn_cast<llhd::SigExtractOp>(definingOp)) {
+      reference = extract.getInput();
+      continue;
+    }
+    break;
+  }
+  return {};
+}
+
+static LogicalResult eraseDeadSignalAliases(llhd::SignalOp signal) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    SmallVector<Operation *> aliases;
+    SmallVector<Value> worklist{signal.getResult()};
+    while (!worklist.empty()) {
+      Value reference = worklist.pop_back_val();
+      for (Operation *user : reference.getUsers()) {
+        if (!isa<llhd::SigArraySliceOp, llhd::SigArrayGetOp,
+                 llhd::SigStructExtractOp, llhd::SigExtractOp>(user))
+          continue;
+        aliases.push_back(user);
+        worklist.append(user->getResults().begin(), user->getResults().end());
+      }
+    }
+    for (Operation *alias : llvm::reverse(aliases)) {
+      if (!alias->use_empty())
+        continue;
+      alias->erase();
+      changed = true;
+    }
+  }
+  if (!signal->use_empty())
+    return signal.emitOpError("unsupported signal alias remains after lowering");
+  signal->erase();
+  return success();
+}
+
+static bool hasUseInCombinationalRegion(llhd::SignalOp signal) {
+  SmallVector<Value> worklist{signal.getResult()};
+  while (!worklist.empty()) {
+    Value reference = worklist.pop_back_val();
+    for (Operation *user : reference.getUsers()) {
+      if (user->getParentOfType<llhd::CombinationalOp>())
+        return true;
+      if (isa<llhd::SigArraySliceOp, llhd::SigArrayGetOp,
+              llhd::SigStructExtractOp, llhd::SigExtractOp>(user))
+        worklist.append(user->getResults().begin(), user->getResults().end());
+    }
+  }
+  return false;
 }
 
 /// Convert the module-level signals into registers or combinational values.
@@ -372,16 +631,20 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
     OpBuilder builder(sig);
     Location loc = sig.getLoc();
 
+    // `llhd.combinational` has its own control-flow and drive semantics.  Do
+    // not partially rewrite a signal observed from such a region; a separate
+    // combinational lowering must first hoist those drives and probes.
+    if (hasUseInCombinationalRegion(sig))
+      continue;
+
     llvm::SmallVector<llhd::DriveOp> drives;
     bool hasComplexDrive = false;
     for (auto &op : module.getOps()) {
       if (auto drive = dyn_cast<llhd::DriveOp>(&op)) {
-        if (drive.getSignal() == sig)
-          drives.push_back(drive);
-        else if (auto sliceOp =
-                     drive.getSignal().getDefiningOp<llhd::SigArraySliceOp>())
-          if (sliceOp.getInput() == sig)
-            hasComplexDrive = true;
+        if (getRootSignal(drive.getSignal()) != sig)
+          continue;
+        drives.push_back(drive);
+        hasComplexDrive |= drive.getSignal() != sig.getResult();
       }
     }
     // Determine the clock from the driving processes; require a single
@@ -389,18 +652,29 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
     Value clock;
     for (auto drive : drives) {
       auto it = driveInfos.find(drive);
-      if (it == driveInfos.end())
+      Value driveClock;
+      if (it != driveInfos.end())
+        driveClock = it->second.clock;
+      else if (hasComplexDrive &&
+               drive.getValue().getDefiningOp<seq::CompRegOp>())
+        driveClock = drive.getValue().getDefiningOp<seq::CompRegOp>().getClk();
+      else if (hasComplexDrive &&
+               drive.getValue().getDefiningOp<seq::FirRegOp>())
+        driveClock = drive.getValue().getDefiningOp<seq::FirRegOp>().getClk();
+      if (!driveClock)
         continue;
-      if (clock && clock != it->second.clock) {
+      if (clock && clock != driveClock) {
         sig.emitOpError("signal driven from multiple clock domains");
         return failure();
       }
-      clock = it->second.clock;
+      clock = driveClock;
     }
 
     if (drives.empty() && !hasComplexDrive) {
-      sig.replaceAllUsesWith(sig.getInit());
-      sig->erase();
+      for (auto *user : llvm::make_early_inc_range(sig->getUsers()))
+        replaceSignalUse(builder, user, sig, sig.getInit());
+      if (failed(eraseDeadSignalAliases(sig)))
+        return failure();
       continue;
     }
 
@@ -409,7 +683,7 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
     if (hasComplexDrive) {
       auto canonicalSigType = hw::getCanonicalType(sig.getInit().getType());
       auto arrayType = dyn_cast<hw::ArrayType>(canonicalSigType);
-      if (!arrayType || !clock)
+      if (!arrayType)
         continue; // Unsupported shape: leave the signal in place.
       uint64_t numElements = arrayType.getNumElements();
       Type elemType = arrayType.getElementType();
@@ -418,8 +692,12 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
 
       // Create the register from the init and patch its next value after
       // the update mux tree is built.
-      auto reg = builder.create<seq::CompRegOp>(loc, sig.getInit(), clock);
-      Value current = reg;
+      seq::CompRegOp reg;
+      Value current = sig.getInit();
+      if (clock) {
+        reg = builder.create<seq::CompRegOp>(loc, sig.getInit(), clock);
+        current = reg;
+      }
       SmallVector<Value> elems;
       for (uint64_t i = 0; i < numElements; ++i) {
         auto idx = builder.create<hw::ConstantOp>(loc, APInt(indexWidth, i));
@@ -433,6 +711,17 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
           enable = infoIt->second.condition;
         if (!enable)
           enable = constTrue(builder, loc);
+        if (drive.getSignal() == sig.getResult()) {
+          for (uint64_t i = 0; i < numElements; ++i) {
+            auto idx =
+                builder.create<hw::ConstantOp>(loc, APInt(indexWidth, i));
+            auto newVal = builder.create<hw::ArrayGetOp>(
+                loc, drive.getValue(), idx);
+            elems[i] = comb::MuxOp::create(builder, loc, enable, newVal,
+                                           elems[i]);
+          }
+          continue;
+        }
         Value low;
         uint64_t sliceLen = 0;
         if (auto sliceOp =
@@ -452,6 +741,12 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
           return failure();
         }
         for (uint64_t i = 0; i < numElements; ++i) {
+          APInt constantLow;
+          if (matchPattern(low, m_ConstantInt(&constantLow))) {
+            uint64_t lowValue = constantLow.getZExtValue();
+            if (i < lowValue || i >= lowValue + sliceLen)
+              continue;
+          }
           auto iConst =
               builder.create<hw::ConstantOp>(loc, APInt(indexWidth, i));
           auto iSub =
@@ -474,12 +769,22 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
           auto inRange = comb::AndOp::create(builder, loc, inRangeLow,
                                               inRangeHigh, true);
           Value newVal;
-          if (sliceLen == 1)
+          if (sliceLen == 1 &&
+              !isa<hw::ArrayType>(hw::getCanonicalType(
+                  drive.getValue().getType())))
             newVal = drive.getValue();
-          else
+          else {
+            auto sliceIndexWidth =
+                std::max(1u, llvm::Log2_64_Ceil(sliceLen));
+            Value sliceIndex = iSub;
+            if (sliceIndex.getType().getIntOrFloatBitWidth() !=
+                sliceIndexWidth)
+              sliceIndex = builder.create<comb::ExtractOp>(
+                  loc, builder.getIntegerType(sliceIndexWidth), sliceIndex, 0);
             newVal =
-                builder.create<hw::ArrayGetOp>(loc, drive.getValue(), iSub)
+                builder.create<hw::ArrayGetOp>(loc, drive.getValue(), sliceIndex)
                     .getResult();
+          }
           elems[i] = comb::MuxOp::create(
               builder, loc,
               comb::AndOp::create(builder, loc, enable, inRange, true),
@@ -489,21 +794,30 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
       SmallVector<Value> reversed(elems.rbegin(), elems.rend());
       Value next =
           builder.create<hw::ArrayCreateOp>(loc, reversed).getResult();
-      reg.setOperand(0, next);
+      Value replacement = next;
+      if (reg) {
+        reg.setOperand(0, next);
+        replacement = reg;
+      }
 
       for (auto *user : llvm::make_early_inc_range(sig->getUsers())) {
         if (isa<llhd::DriveOp>(user))
           continue;
-        replaceSignalUse(builder, user, sig, reg);
+        replaceSignalUse(builder, user, sig, replacement);
       }
       for (auto drive : drives)
         drive->erase();
-      sig->erase();
+      if (failed(eraseDeadSignalAliases(sig)))
+        return failure();
       continue;
     }
 
     if (clock) {
       // Clocked register; the enable of each drive is its block condition.
+
+      for (auto drive : drives)
+        if (drive.getValue().getType() != sig.getInit().getType())
+          return drive.emitOpError("drive value type does not match signal");
 
       Value next = drives.back().getValue();
       for (auto it = std::next(drives.rbegin()); it != drives.rend(); ++it) {
@@ -520,11 +834,15 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
       }
       for (auto drive : drives)
         drive->erase();
-      sig->erase();
+      if (failed(eraseDeadSignalAliases(sig)))
+        return failure();
       continue;
     }
 
     // Combinational signal: mux over the drives.
+    for (auto drive : drives)
+      if (drive.getValue().getType() != sig.getInit().getType())
+        return drive.emitOpError("drive value type does not match signal");
     Value value = drives.back().getValue();
     for (auto it = std::next(drives.rbegin()); it != drives.rend(); ++it) {
       Value enable = it->getEnable();
@@ -539,7 +857,8 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
     }
     for (auto drive : drives)
       drive->erase();
-    sig->erase();
+    if (failed(eraseDeadSignalAliases(sig)))
+      return failure();
   }
   return success();
 }
@@ -554,6 +873,14 @@ struct LowerTimedProcessesPass
     for (auto process :
          llvm::make_early_inc_range(module.getOps<llhd::ProcessOp>())) {
       if (!lowerProcess(process, driveInfos)) {
+        signalPassFailure();
+        return;
+      }
+    }
+
+    for (auto combinational :
+         llvm::make_early_inc_range(module.getOps<llhd::CombinationalOp>())) {
+      if (failed(lowerCombinational(combinational, driveInfos))) {
         signalPassFailure();
         return;
       }

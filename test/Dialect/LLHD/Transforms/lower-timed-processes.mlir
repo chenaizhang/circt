@@ -26,3 +26,30 @@ hw.module @counter(in %clk : i1, out count : i2) {
   %1 = llhd.prb %sig : i2
   hw.output %1 : i2
 }
+
+// CHECK-LABEL: hw.module @conditional_comb
+// CHECK-NOT: llhd.combinational
+// CHECK-NOT: llhd.sig
+// CHECK-NOT: llhd.drv
+// CHECK-NOT: llhd.prb
+hw.module @conditional_comb(in %select : i1, in %a : i8, in %b : i8,
+                            out value : i8) {
+  %zero = hw.constant 0 : i8
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %signal = llhd.sig %zero : i8
+  %result = llhd.combinational -> i8 {
+    cf.cond_br %select, ^bb1, ^bb2
+  ^bb1:
+    llhd.drv %signal, %a after %time : i8
+    cf.br ^bb3(%a : i8)
+  ^bb2:
+    llhd.drv %signal, %b after %time : i8
+    cf.br ^bb3(%b : i8)
+  ^bb3(%selected : i8):
+    llhd.yield %selected : i8
+  }
+  %observed = llhd.prb %signal : i8
+  // CHECK: comb.mux
+  // CHECK: hw.output
+  hw.output %observed : i8
+}
