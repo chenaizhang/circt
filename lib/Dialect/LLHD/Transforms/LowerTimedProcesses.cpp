@@ -25,6 +25,7 @@
 #include "circt/Dialect/LLHD/LLHDPasses.h"
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "circt/Dialect/Sim/SimOps.h"
+#include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
@@ -888,6 +889,26 @@ struct LowerTimedProcessesPass
 
     if (failed(lowerSignals(module, driveInfos)))
       signalPassFailure();
+
+    // Process bodies are graph regions, while the lowered HW module body is
+    // an SSA block.  Moving operations from the former into the latter must
+    // therefore restore a topological order.  In particular, a process may
+    // contain a value produced in a later CFG block and consumed by an
+    // operation in an earlier block.  Leaving the textual block order intact
+    // creates use-before-definition IR that is only diagnosed by a later
+    // conversion (and often manifests as misleading aggregate type errors).
+    // Register feedback is intentionally accepted by the topological sorter;
+    // seq.compreg/firreg are the cycle boundaries in this graph region.
+    if (!mlir::sortTopologically(module.getBodyBlock())) {
+      // A clocked signal can legitimately feed its own next-state expression.
+      // That is a semantic feedback edge, not a textual use-before-definition
+      // that this pass can eliminate.  The sorter has still moved every
+      // acyclic operation into dependency order; leave the remaining cycle for
+      // the sequential lowering, which materializes the state signal before
+      // evaluating the next-state expression.
+      module.emitWarning(
+          "timed-process lowering retained a sequential feedback cycle");
+    }
   }
 };
 

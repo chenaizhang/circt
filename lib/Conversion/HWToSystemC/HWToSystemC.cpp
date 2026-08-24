@@ -15,6 +15,7 @@
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWPasses.h"
 #include "circt/Dialect/Seq/SeqOps.h"
+#include "circt/Dialect/Sim/SimDialect.h"
 #include "circt/Dialect/SystemC/SystemCOps.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
 #include "mlir/IR/BuiltinDialect.h"
@@ -703,6 +704,7 @@ static void populateLegality(ConversionTarget &target) {
   target.addLegalDialect<systemc::SystemCDialect>();
   target.addLegalDialect<comb::CombDialect>();
   target.addLegalDialect<emitc::EmitCDialect>();
+  target.addLegalDialect<sim::SimDialect>();
   target.addIllegalDialect<seq::SeqDialect>();
   target.addLegalOp<hw::ConstantOp>();
 }

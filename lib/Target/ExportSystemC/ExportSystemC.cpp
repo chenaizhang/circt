@@ -15,6 +15,8 @@
 #include "RegisterAllEmitters.h"
 #include "circt/Dialect/Comb/CombDialect.h"
 #include "circt/Dialect/HW/HWDialect.h"
+#include "circt/Dialect/Interop/InteropDialect.h"
+#include "circt/Dialect/Sim/SimDialect.h"
 #include "circt/Dialect/SystemC/SystemCDialect.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -138,7 +140,9 @@ void ExportSystemC::registerExportSystemCTranslation() {
       },
       [](mlir::DialectRegistry &registry) {
         registry.insert<hw::HWDialect, comb::CombDialect,
-                        systemc::SystemCDialect, mlir::emitc::EmitCDialect>();
+                        interop::InteropDialect, sim::SimDialect,
+                        systemc::SystemCDialect,
+                        mlir::emitc::EmitCDialect>();
       });
 
   static mlir::TranslateFromMLIRRegistration toSplitSystemC(
@@ -148,6 +152,8 @@ void ExportSystemC::registerExportSystemCTranslation() {
       },
       [](mlir::DialectRegistry &registry) {
         registry.insert<hw::HWDialect, comb::CombDialect,
-                        systemc::SystemCDialect, mlir::emitc::EmitCDialect>();
+                        interop::InteropDialect, sim::SimDialect,
+                        systemc::SystemCDialect,
+                        mlir::emitc::EmitCDialect>();
       });
 }

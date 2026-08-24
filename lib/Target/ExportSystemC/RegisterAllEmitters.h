@@ -19,6 +19,7 @@
 #include "Patterns/CombEmissionPatterns.h"
 #include "Patterns/EmitCEmissionPatterns.h"
 #include "Patterns/HWEmissionPatterns.h"
+#include "Patterns/SimEmissionPatterns.h"
 #include "Patterns/SystemCEmissionPatterns.h"
 
 namespace circt {
@@ -30,6 +31,7 @@ inline void registerAllOpEmitters(OpEmissionPatternSet &patterns,
   populateBuiltinOpEmitters(patterns, context);
   populateCombOpEmitters(patterns, context);
   populateHWEmitters(patterns, context);
+  populateSimOpEmitters(patterns, context);
   populateSystemCOpEmitters(patterns, context);
   populateEmitCOpEmitters(patterns, context);
 }

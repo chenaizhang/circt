@@ -30,7 +30,12 @@ def SignalReadOp : SystemCOp<"signal.read", [Pure,
     value of the signal/port.
   }];
 
-  let arguments = (ins AnyTypeOf<[InputType, InOutType, SignalType]>:$input);
+  // sc_out derives from sc_inout in SystemC and is therefore readable.  RTL
+  // lowering can legally materialize a feedback read from an output port
+  // (for example after aggregate/SSA reconstruction), so reject neither the
+  // dialect operation nor the emitted C++ form in that case.
+  let arguments = (ins AnyTypeOf<[InputType, OutputType, InOutType,
+                                  SignalType]>:$input);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$input attr-dict `:` qualified(type($input))";
 
@@ -84,7 +89,8 @@ def SignalPosedgeOp : SystemCOp<"signal.posedge", [Pure]> {
     The input channel must have `i1` as its base type.
   }];
 
-  let arguments = (ins AnyTypeOf<[InputType, InOutType, SignalType]>:$input);
+  let arguments = (ins AnyTypeOf<[InputType, OutputType, InOutType,
+                                  SignalType]>:$input);
   let results = (outs I1:$result);
   let assemblyFormat = "$input attr-dict `:` qualified(type($input))";
   let hasVerifier = 1;

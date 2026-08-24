@@ -5,6 +5,7 @@ add_circt_translation_library(CIRCTExportSystemC
   Patterns/CombEmissionPatterns.cpp
   Patterns/EmitCEmissionPatterns.cpp
   Patterns/HWEmissionPatterns.cpp
+  Patterns/SimEmissionPatterns.cpp
   Patterns/SystemCEmissionPatterns.cpp
 
   ADDITIONAL_HEADER_DIRS
@@ -15,6 +16,8 @@ add_circt_translation_library(CIRCTExportSystemC
   LINK_LIBS PUBLIC
   CIRCTComb
   CIRCTHW
+  CIRCTInteropDialect
+  CIRCTSim
   CIRCTSystemC
   CIRCTSupport
   MLIREmitCDialect
