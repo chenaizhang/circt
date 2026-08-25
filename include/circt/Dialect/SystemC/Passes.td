@@ -43,7 +43,10 @@ def SystemCWrapVerilatedInstances : Pass<"systemc-wrap-verilated-instances",
                "llvm::cl::ZeroOrMore,">,
     ListOption<"instances", "instances", "std::string",
                "Instance names to wrap; may select internal HW modules",
-               "llvm::cl::ZeroOrMore,">
+               "llvm::cl::ZeroOrMore,">,
+    Option<"externalize", "externalize", "bool", "true",
+           "Replace explicitly selected internal HW modules with extern "
+           "declarations so HW-to-SystemC does not also lower their RTL body">
   ];
   let dependentDialects = [
     "hw::HWDialect", "systemc::SystemCDialect"

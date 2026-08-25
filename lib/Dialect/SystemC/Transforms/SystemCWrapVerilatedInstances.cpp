@@ -11,6 +11,7 @@
 #include "circt/Dialect/SystemC/SystemCPasses.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/SetVector.h"
 
 namespace circt {
 namespace systemc {
@@ -31,6 +32,7 @@ struct SystemCWrapVerilatedInstancesPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
     SmallVector<hw::InstanceOp> instanceOps;
+    llvm::SetVector<hw::HWModuleOp> modulesToExternalize;
     module.walk(
         [&](hw::InstanceOp instance) { instanceOps.push_back(instance); });
 
@@ -80,6 +82,30 @@ struct SystemCWrapVerilatedInstancesPass
           inputs);
       instance.replaceAllUsesWith(interop.getResults());
       instance.erase();
+
+      // Explicitly selected internal modules are Verilator black boxes.  Do
+      // not leave their RTL body in the module being lowered: the HW to
+      // SystemC conversion would otherwise try to translate that body in
+      // addition to emitting the interop call site.  Keep the symbol and the
+      // flattened port ABI, replacing only the implementation with an extern
+      // declaration.  The default (no explicit selection) keeps existing
+      // extern-leaf behavior unchanged.
+      if (externalize && (!modules.empty() || !instances.empty()))
+        if (auto targetHW = dyn_cast<hw::HWModuleOp>(target))
+          modulesToExternalize.insert(targetHW);
+    }
+
+    for (hw::HWModuleOp target : modulesToExternalize) {
+      OpBuilder builder(target);
+      SmallVector<NamedAttribute> attrs;
+      if (auto visibility =
+              target->getAttrOfType<StringAttr>(SymbolTable::getVisibilityAttrName()))
+        attrs.emplace_back(SymbolTable::getVisibilityAttrName(), visibility);
+      auto ext = hw::HWModuleExternOp::create(
+          builder, target.getLoc(), target.getNameAttr(), target.getPortList(),
+          target.getName(), target.getParameters(), attrs);
+      ext.setAllPortAttrs(target.getAllPortAttrs());
+      target.erase();
     }
   }
 };
