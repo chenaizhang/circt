@@ -195,8 +195,10 @@ struct MuxEmitter : OpEmissionPattern<MuxOp> {
 
   MatchResult matchInlinable(Value value) override {
     auto op = value.getDefiningOp<MuxOp>();
-    if (!op || !isa<IntegerType>(value.getType()) ||
-        getWidth(value.getType()) > 512)
+    // sc_bv supports the same conditional-value construction as the smaller
+    // SystemC integer wrappers.  Keep wide aggregate muxes inline; this is
+    // needed after HW aggregate lowering for packed interface glue.
+    if (!op)
       return {};
     return Precedence::FUNCTIONAL_CAST;
   }
@@ -204,6 +206,18 @@ struct MuxEmitter : OpEmissionPattern<MuxOp> {
   void emitInlined(Value value, EmissionPrinter &p) override {
     auto op = value.getDefiningOp<MuxOp>();
     unsigned width = getWidth(value.getType());
+    if (width > 512) {
+      p << "([&]() { ";
+      emitFixedWidthType(p, width);
+      p << " result; if (";
+      p.getInlinable(op.getCond()).emit();
+      p << ") result = ";
+      p.getInlinable(op.getTrueValue()).emit();
+      p << "; else result = ";
+      p.getInlinable(op.getFalseValue()).emit();
+      p << "; return result; }())";
+      return;
+    }
     emitFixedWidthType(p, width);
     p << "(";
     emitOperand(op.getCond(), Precedence::TERNARY, p);
@@ -226,15 +240,37 @@ struct ConcatEmitter : OpEmissionPattern<ConcatOp> {
 
   MatchResult matchInlinable(Value value) override {
     auto op = value.getDefiningOp<ConcatOp>();
-    if (!op || getWidth(value.getType()) > 512)
+    // sc_bv supports widths beyond sc_biguint's 512-bit convenience limit;
+    // concatenation itself does not require an arithmetic backend.  Keep
+    // large aggregate/stream glue values inline so the generated SystemC
+    // remains compilable for real designs such as the 768-bit DSC path.
+    if (!op)
       return {};
     return Precedence::FUNCTIONAL_CAST;
   }
 
   void emitInlined(Value value, EmissionPrinter &p) override {
     auto op = value.getDefiningOp<ConcatOp>();
-    emitFixedWidthType(p, getWidth(value.getType()));
-    p << "(";
+    unsigned width = getWidth(value.getType());
+    if (width > 512) {
+      p << "([&]() { ";
+      emitFixedWidthType(p, width);
+      p << " result; ";
+      unsigned high = width;
+      for (Value input : op.getInputs()) {
+        unsigned inputWidth = getWidth(input.getType());
+        high -= inputWidth;
+        p << "result.range(" << (high + inputWidth - 1) << ", " << high
+          << ") = ";
+        emitUnsignedCast(input, p);
+        p << "; ";
+      }
+      p << "return result; }())";
+      return;
+    } else {
+      emitFixedWidthType(p, width);
+      p << "(";
+    }
     for (size_t i = 0, e = op.getInputs().size(); i < e; ++i) {
       if (i + 1 != e)
         p << "sc_dt::concat(";
@@ -244,7 +280,10 @@ struct ConcatEmitter : OpEmissionPattern<ConcatOp> {
     }
     for (size_t i = 1, e = op.getInputs().size(); i < e; ++i)
       p << ")";
-    p << ")";
+    if (width > 512)
+      p << "; return result; }())";
+    else
+      p << ")";
   }
 };
 
@@ -253,7 +292,9 @@ struct ExtractEmitter : OpEmissionPattern<ExtractOp> {
 
   MatchResult matchInlinable(Value value) override {
     auto op = value.getDefiningOp<ExtractOp>();
-    if (!op || getWidth(value.getType()) > 512)
+    // sc_bv::range is available for wide packed values as well as
+    // sc_biguint/sc_uint, so extraction need not stop at 512 bits.
+    if (!op)
       return {};
     return Precedence::FUNCTIONAL_CAST;
   }
@@ -262,6 +303,18 @@ struct ExtractEmitter : OpEmissionPattern<ExtractOp> {
     auto op = value.getDefiningOp<ExtractOp>();
     unsigned low = op.getLowBit();
     unsigned high = low + getWidth(value.getType()) - 1;
+    if (getWidth(op.getInput().getType()) > 512) {
+      p << "([&]() { ";
+      emitFixedWidthType(p, getWidth(value.getType()));
+      p << " result; ";
+      p << "sc_bv<" << getWidth(value.getType())
+        << "> slice; slice.range(" << (getWidth(value.getType()) - 1)
+        << ", 0) = ";
+      emitUnsignedCast(op.getInput(), p);
+      p << ".range(" << high << ", " << low << "); result = slice; "
+        << "return result; }())";
+      return;
+    }
     emitFixedWidthType(p, getWidth(value.getType()));
     p << "(";
     emitUnsignedCast(op.getInput(), p);
