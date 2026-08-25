@@ -20,6 +20,15 @@
 
 #define GET_OP_CLASSES
 #include "circt/Dialect/Interop/InteropEnums.h.inc"
+
+namespace circt {
+namespace interop {
+/// Marks a container operation that can host lowered procedural interop.
+template <typename ConcreteType>
+struct HasInterop : mlir::OpTrait::TraitBase<ConcreteType, HasInterop> {};
+} // namespace interop
+} // namespace circt
+
 // Clang format shouldn't reorder these headers.
 #include "circt/Dialect/Interop/Interop.h.inc"
 

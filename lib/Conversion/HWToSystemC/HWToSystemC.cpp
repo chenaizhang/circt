@@ -707,6 +707,9 @@ static void populateLegality(ConversionTarget &target) {
   target.addLegalDialect<sim::SimDialect>();
   target.addIllegalDialect<seq::SeqDialect>();
   target.addLegalOp<hw::ConstantOp>();
+  // Extern leaves are retained as Verilator/SystemC black boxes. They are
+  // referenced by systemc.interop.verilated after instance wrapping.
+  target.addLegalOp<hw::HWModuleExternOp>();
 }
 
 static void populateOpConversion(RewritePatternSet &patterns,

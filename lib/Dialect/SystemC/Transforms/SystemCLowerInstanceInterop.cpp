@@ -122,10 +122,7 @@ private:
         FunctionType::get(updateBuilder.getContext(), {}, {}), state, "eval",
         MemberAccessKind::Arrow);
 
-    // TODO: this has to be changed to a systemc::CallIndirectOp once the PR is
-    // merged, also remove the dependency to the func dialect from the cmake,
-    // header include, pass dependent dialects
-    func::CallIndirectOp::create(updateBuilder, loc, evalFunc.getResult());
+    CallIndirectOp::create(updateBuilder, loc, evalFunc.getResult());
 
     // Read the verilated module's output ports.
     SmallVector<Value> results;
@@ -177,7 +174,7 @@ void SystemCLowerInstanceInteropPass::runOnOperation() {
   target.addLegalDialect<interop::InteropDialect>();
   target.addLegalDialect<emitc::EmitCDialect>();
   target.addLegalDialect<SystemCDialect>();
-  target.addLegalOp<func::CallIndirectOp>();
+  target.addLegalOp<CallIndirectOp>();
   target.addIllegalOp<InteropVerilatedOp>();
 
   // Setup the conversion.

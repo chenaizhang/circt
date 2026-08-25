@@ -15,6 +15,7 @@
 
 #include "circt/Dialect/HW/HWInstanceImplementation.h"
 #include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/Interop/InteropOps.h"
 #include "circt/Dialect/SystemC/SystemCAttributes.h"
 #include "circt/Dialect/SystemC/SystemCDialect.h"
 #include "circt/Dialect/SystemC/SystemCOpInterfaces.h"

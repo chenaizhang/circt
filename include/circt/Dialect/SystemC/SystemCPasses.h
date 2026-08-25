@@ -25,11 +25,20 @@ class MLIRContext;
 namespace circt {
 namespace systemc {
 
+#define GEN_PASS_DECL
+#include "circt/Dialect/SystemC/Passes.h.inc"
+
 /// Populate the rewrite patterns for SystemC's instance-side interop lowerings.
 void populateSystemCLowerInstanceInteropPatterns(
     mlir::RewritePatternSet &patterns, mlir::MLIRContext *ctx);
 
 std::unique_ptr<mlir::Pass> createSystemCLowerInstanceInteropPass();
+
+std::unique_ptr<mlir::Pass>
+createSystemCWrapVerilatedInstancesPass();
+
+std::unique_ptr<mlir::Pass>
+createSystemCContainerInteropLoweringPass();
 
 /// Generate the code for registering passes.
 #define GEN_PASS_REGISTRATION

@@ -23,6 +23,12 @@ using namespace circt::ExportSystemC;
 //===----------------------------------------------------------------------===//
 
 namespace {
+/// Extern HW modules are provided by an external implementation (for example
+/// a Verilator-generated header) and therefore do not emit a second C++ body.
+struct ModuleExternEmitter : OpEmissionPattern<HWModuleExternOp> {
+  using OpEmissionPattern::OpEmissionPattern;
+};
+
 /// The ConstantOp always inlines its value. Examples:
 /// * hw.constant 5 : i32 ==> 5
 /// * hw.constant 0 : i1 ==> false
@@ -48,5 +54,5 @@ struct ConstantEmitter : OpEmissionPattern<ConstantOp> {
 
 void circt::ExportSystemC::populateHWEmitters(OpEmissionPatternSet &patterns,
                                               MLIRContext *context) {
-  patterns.add<ConstantEmitter>(context);
+  patterns.add<ModuleExternEmitter, ConstantEmitter>(context);
 }

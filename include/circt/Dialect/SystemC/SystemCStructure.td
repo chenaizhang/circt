@@ -25,7 +25,12 @@ include "mlir/IR/RegionKindInterface.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
+def HasInterop : NativeOpTrait<"HasInterop"> {
+  let cppNamespace = "::circt::interop";
+}
+
 def SCModuleOp : SystemCOp<"module", [
+    HasInterop,
     Symbol,
     DeclareOpInterfaceMethods<InstanceGraphModuleOpInterface>,
     FunctionOpInterface,

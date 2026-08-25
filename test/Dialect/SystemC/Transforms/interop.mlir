@@ -17,7 +17,7 @@ hw.module @Foo (in %x: i32, out y: i32) {
   // CHECK-NEXT:   [[V3:%.+]] = systemc.cpp.member_access %arg0 arrow "b" : (!emitc.ptr<!emitc.opaque<"VBar">>) -> i32
   // CHECK-NEXT:   systemc.cpp.assign [[V3]] = %arg2 : i32
   // CHECK-NEXT:   [[V4:%.+]] = systemc.cpp.member_access %arg0 arrow "eval" : (!emitc.ptr<!emitc.opaque<"VBar">>) -> (() -> ())
-  // CHECK-NEXT:   func.call_indirect [[V4]]() : () -> ()
+  // CHECK-NEXT:   systemc.cpp.call_indirect [[V4]]() : () -> ()
   // CHECK-NEXT:   [[V5:%.+]] = systemc.cpp.member_access %arg0 arrow "c" : (!emitc.ptr<!emitc.opaque<"VBar">>) -> i32
   // CHECK-NEXT:   interop.return [[V5]] : i32
   // CHECK-NEXT: }
@@ -35,7 +35,7 @@ hw.module @Foo (in %x: i32, out y: i32) {
   // CHECK-NEXT: interop.procedural.update cpp [[[STATE2]]] : [!emitc.ptr<!emitc.opaque<"VEmpty">>] () -> () {
   // CHECK-NEXT: ^bb0(%arg0: !emitc.ptr<!emitc.opaque<"VEmpty">>):
   // CHECK-NEXT:   [[V7:%.+]] = systemc.cpp.member_access %arg0 arrow "eval" : (!emitc.ptr<!emitc.opaque<"VEmpty">>) -> (() -> ())
-  // CHECK-NEXT:   func.call_indirect [[V7]]() : () -> ()
+  // CHECK-NEXT:   systemc.cpp.call_indirect [[V7]]() : () -> ()
   // CHECK-NEXT:   interop.return
   // CHECK-NEXT: }
   // CHECK-NEXT: interop.procedural.dealloc cpp [[STATE2]] : !emitc.ptr<!emitc.opaque<"VEmpty">> {
