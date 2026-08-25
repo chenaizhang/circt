@@ -17,6 +17,7 @@
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "circt/Dialect/Sim/SimDialect.h"
 #include "circt/Dialect/SystemC/SystemCOps.h"
+#include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/EmitC/IR/EmitC.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/Pass/Pass.h"
@@ -24,6 +25,7 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
@@ -241,6 +243,157 @@ static LogicalResult lowerStructureOnly(ModuleOp module,
   return success();
 }
 
+static StringAttr getUniqueStateName(SCModuleOp module, StringRef requested,
+                                     Builder &builder);
+
+// Break sequential feedback before the HW graph region is moved into the
+// SSACFG body of systemc.func.  A seq register result is the current state,
+// so every use of that result can safely read a SystemC state signal.  The
+// register operation itself is kept until the normal seq conversion pattern,
+// which will write the same signal with the computed next state.
+static LogicalResult preLowerSequentialFeedbacks(
+    SCModuleOp scModule, SCFuncOp scFunc, ConversionPatternRewriter &rewriter,
+    const TypeConverter &typeConverter, SmallVectorImpl<Value> &stateSignals) {
+  SmallVector<Operation *> registers;
+  scFunc.walk([&](Operation *op) {
+    if (isa<seq::CompRegOp, seq::CompRegClockEnabledOp, seq::FirRegOp>(op))
+      registers.push_back(op);
+  });
+  if (registers.empty())
+    return success();
+
+  auto ctor = scModule.getOrCreateCtor(rewriter);
+  for (Operation *reg : registers) {
+    Type convertedType = typeConverter.convertType(reg->getResult(0).getType());
+    if (!convertedType)
+      return reg->emitError("failed to convert sequential state type");
+
+    StringRef requested;
+    if (auto comp = dyn_cast<seq::CompRegOp>(reg))
+      requested = comp.getName().value_or("");
+    else if (auto comp = dyn_cast<seq::CompRegClockEnabledOp>(reg))
+      requested = comp.getName().value_or("");
+    else
+      requested = cast<seq::FirRegOp>(reg).getName();
+    StringAttr stateName = getUniqueStateName(scModule, requested, rewriter);
+
+    rewriter.setInsertionPoint(ctor);
+    Value state = SignalOp::create(rewriter, reg->getLoc(),
+                                   SignalType::get(convertedType), stateName)
+                      .getSignal();
+    reg->setAttr("systemc.prelowered_state", stateName);
+
+    rewriter.setInsertionPointToStart(scFunc.getBodyBlock());
+    Value stateRead = SignalReadOp::create(rewriter, reg->getLoc(), state);
+    Value current = typeConverter.materializeSourceConversion(
+        rewriter, reg->getLoc(), reg->getResult(0).getType(), stateRead);
+    if (!current)
+      return reg->emitError("failed to materialize sequential state read");
+    for (Operation *user : llvm::make_early_inc_range(reg->getResult(0).getUsers()))
+      user->replaceUsesOfWith(reg->getResult(0), current);
+    stateSignals.push_back(state);
+  }
+  return success();
+}
+
+static Value findPreLoweredState(SCModuleOp module, StringAttr stateName) {
+  if (!stateName)
+    return {};
+  for (auto signal : module.getBodyBlock()->getOps<SignalOp>())
+    if (signal.getName() == stateName.getValue())
+      return signal.getSignal();
+  return {};
+}
+
+// ExportSystemC represents combinational values as inline expressions.  A
+// wide packed mux/extract chain can otherwise duplicate the same 768-bit
+// expression at every leaf and grow exponentially.  Materialize the wide
+// aggregate glue once as a C++ local variable; the existing comb emitters
+// still provide the initializer expression, while all later users refer to a
+// stable name.
+static void materializeWideAggregateValues(ModuleOp module) {
+  module.walk([&](SCFuncOp func) {
+    SmallVector<Operation *> wideOps;
+    func.walk([&](Operation *op) {
+      if (!isa<comb::ConcatOp, comb::MuxOp, comb::ExtractOp>(op) ||
+          op->getNumResults() != 1)
+        return;
+      auto integer = dyn_cast<IntegerType>(op->getResult(0).getType());
+      if (integer && integer.getWidth() > 512)
+        wideOps.push_back(op);
+    });
+
+    unsigned nextName = 0;
+    for (Operation *op : wideOps) {
+      if (!op->getBlock())
+        continue;
+      OpBuilder builder(op->getContext());
+      builder.setInsertionPointAfter(op);
+      auto name = builder.getStringAttr("wide_tmp_" +
+                                       std::to_string(nextName++));
+      unsigned width = cast<IntegerType>(op->getResult(0).getType()).getWidth();
+      Type vectorType = BitVectorType::get(op->getContext(), width);
+      Value init = ConvertOp::create(builder, op->getLoc(), vectorType,
+                                     op->getResult(0));
+      auto variable = VariableOp::create(builder, op->getLoc(), vectorType,
+                                         name, init);
+      Value source = ConvertOp::create(builder, op->getLoc(),
+                                       op->getResult(0).getType(),
+                                       variable.getVariable());
+      op->getResult(0).replaceUsesWithIf(
+          source, [&](OpOperand &use) {
+            return use.getOwner() != init.getDefiningOp() &&
+                   use.getOwner() != variable.getOperation() &&
+                   use.getOwner() != source.getDefiningOp();
+          });
+    }
+  });
+}
+
+/// Return a short dependency cycle in an SSA block. HW graph regions permit
+/// forward references, but the SystemC function body is an SSACFG block. This
+/// diagnostic is intentionally local: it identifies the first cycle after
+/// sequential state extraction instead of reporting only an opaque failed
+/// legalization of the enclosing module.
+static SmallVector<Operation *> findDependencyCycle(Block *block) {
+  DenseMap<Operation *, unsigned char> color;
+  SmallVector<Operation *> stack;
+  SmallVector<Operation *> cycle;
+
+  std::function<bool(Operation *)> visit = [&](Operation *op) {
+    color[op] = 1;
+    stack.push_back(op);
+    for (Value operand : op->getOperands()) {
+      Operation *def = operand.getDefiningOp();
+      if (!def || def->getBlock() != block)
+        continue;
+      if (color[def] == 0) {
+        if (visit(def))
+          return true;
+      } else if (color[def] == 1) {
+        auto it = llvm::find(stack, def);
+        cycle.assign(it, stack.end());
+        return true;
+      }
+    }
+    stack.pop_back();
+    color[op] = 2;
+    return false;
+  };
+
+  for (Operation &op : *block)
+    if (color[&op] == 0 && visit(&op))
+      break;
+  return cycle;
+}
+
+static void attachCycleNotes(InFlightDiagnostic &diagnostic, Block *block) {
+  for (Operation *op : findDependencyCycle(block))
+    diagnostic.attachNote(op->getLoc())
+        << "operation in unresolved dependency cycle: "
+        << op->getName().getStringRef();
+}
+
 /// This works on each HW module, creates corresponding SystemC modules, moves
 /// the body of the module into the new SystemC module by splitting up the body
 /// into field declarations, initializations done in a newly added systemc.ctor,
@@ -286,6 +439,33 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     Region &scFuncBody = scFunc.getBody();
     rewriter.inlineRegionBefore(module.getBody(), scFuncBody, scFuncBody.end());
 
+    SmallVector<Value> preLoweredStates;
+    if (failed(preLowerSequentialFeedbacks(
+            scModule, scFunc, rewriter, *typeConverter, preLoweredStates)))
+      return failure();
+
+    // HW module bodies are graph regions and may be printed in an order that
+    // is legal there but not legal for the SSACFG body of systemc.func.  The
+    // register result replacements above cut the sequential SCCs; anything
+    // left that cannot be sorted is therefore a genuine combinational cycle.
+    // Instance operations become SystemC module declarations and channel
+    // bindings. Their input/output SSA edges are therefore structural edges,
+    // not expressions that must be evaluated in the parent's SC_METHOD. Keep
+    // them out of the parent SSACFG topological ordering so legal hierarchy
+    // feedback (A.out -> B.in -> B.out -> A.in) is represented by signals.
+    auto isStructuralOperand = [](Value, Operation *definingOp) {
+      return isa<hw::InstanceOp>(definingOp);
+    };
+    if (!mlir::sortTopologically(scFunc.getBodyBlock(),
+                                 isStructuralOperand)) {
+      auto diagnostic = emitError(
+          module->getLoc(),
+          "cannot order HW body before SystemC conversion; unresolved "
+          "dependency cycle remains after sequential state extraction");
+      attachCycleNotes(diagnostic, scFunc.getBodyBlock());
+      return failure();
+    }
+
     // Register the systemc.func inside the systemc.ctor
     rewriter.setInsertionPointToStart(
         scModule.getOrCreateCtor(rewriter).getBodyBlock());
@@ -296,6 +476,7 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
         llvm::make_filter_range(scModule.getArguments(), [](BlockArgument arg) {
           return !isa<OutputType>(arg.getType());
         }));
+    sensitivityValues.append(preLoweredStates.begin(), preLoweredStates.end());
     if (!sensitivityValues.empty())
       SensitiveOp::create(rewriter, scModule.getLoc(), sensitivityValues);
 
@@ -303,12 +484,24 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     // hw.module) to the systemc.module
     rewriter.setInsertionPointToStart(scFunc.getBodyBlock());
     auto portsLocal = module.getPortList();
-    for (size_t i = 0, e = scFunc.getRegion().getNumArguments(); i < e; ++i) {
+    // HW module block arguments contain inputs only, while the module port
+    // list and the SystemC module arguments contain both inputs and outputs
+    // in declaration order.  Do not use the block-argument index to index
+    // either of those mixed port lists: an output interleaved with inputs
+    // would otherwise materialize the next input using the output's type.
+    SmallVector<unsigned> inputPortIndices;
+    for (auto [portIndex, port] : llvm::enumerate(portsLocal))
+      if (!port.isOutput())
+        inputPortIndices.push_back(portIndex);
+    if (inputPortIndices.size() != scFunc.getRegion().getNumArguments())
+      return emitError(module->getLoc(),
+                       "HW input argument count does not match module ports");
+    for (auto [argIndex, portIndex] : llvm::enumerate(inputPortIndices)) {
       auto inputRead = SignalReadOp::create(rewriter, scFunc.getLoc(),
-                                            scModule.getArgument(i))
+                                            scModule.getArgument(portIndex))
                            .getResult();
       auto converted = typeConverter->materializeSourceConversion(
-          rewriter, scModule.getLoc(), portsLocal[i].type, inputRead);
+          rewriter, scModule.getLoc(), portsLocal[portIndex].type, inputRead);
       scFuncBody.getArgument(0).replaceAllUsesWith(converted);
       scFuncBody.eraseArgument(0);
     }
@@ -395,7 +588,12 @@ public:
       return instanceOp->emitOpError("inout ports not supported");
 
     Location loc = instanceOp->getLoc();
-    auto instanceName = instanceOp.getInstanceNameAttr();
+    // Generate names for C++ declarations, not Verilog hierarchical paths.
+    // Generate blocks commonly introduce names such as
+    // `gen_overflow_sync_0.syn_overflow_inst`, where '.' is legal in RTL but
+    // not in a SystemC member declaration.
+    auto instanceName = getCxxIdentifier(instanceOp.getInstanceNameAttr(),
+                                         rewriter);
     auto instModuleName = instanceOp.getModuleNameAttr();
 
     // Declare the instance.
@@ -575,14 +773,19 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
     Location loc = reg.getLoc();
     Type stateType = this->getTypeConverter()->convertType(reg.getType());
     auto signalType = SignalType::get(stateType);
-    StringRef requestedName = reg.getName().value_or("");
-    StringAttr stateName =
-        getUniqueStateName(scModule, requestedName, rewriter);
+    StringAttr preLoweredName =
+        reg->template getAttrOfType<StringAttr>("systemc.prelowered_state");
+    StringAttr stateName;
+    if (!preLoweredName)
+      stateName = getUniqueStateName(scModule, reg.getName().value_or(""),
+                                     rewriter);
 
     auto ctor = scModule.getOrCreateCtor(rewriter);
-    rewriter.setInsertionPoint(ctor);
-    Value state =
-        SignalOp::create(rewriter, loc, signalType, stateName).getSignal();
+    Value state = findPreLoweredState(scModule, preLoweredName);
+    if (!state) {
+      rewriter.setInsertionPoint(ctor);
+      state = SignalOp::create(rewriter, loc, signalType, stateName).getSignal();
+    }
 
     // Re-run the method after the signal update delta cycle so combinational
     // outputs observe the newly committed register value.
@@ -649,13 +852,18 @@ struct ConvertFirReg : public OpConversionPattern<seq::FirRegOp> {
     Location loc = reg.getLoc();
     Type stateType = getTypeConverter()->convertType(reg.getType());
     auto signalType = SignalType::get(stateType);
-    StringAttr stateName =
-        getUniqueStateName(scModule, reg.getName(), rewriter);
+    StringAttr preLoweredName =
+        reg->template getAttrOfType<StringAttr>("systemc.prelowered_state");
+    StringAttr stateName;
+    if (!preLoweredName)
+      stateName = getUniqueStateName(scModule, reg.getName(), rewriter);
 
     auto ctor = scModule.getOrCreateCtor(rewriter);
-    rewriter.setInsertionPoint(ctor);
-    Value state =
-        SignalOp::create(rewriter, loc, signalType, stateName).getSignal();
+    Value state = findPreLoweredState(scModule, preLoweredName);
+    if (!state) {
+      rewriter.setInsertionPoint(ctor);
+      state = SignalOp::create(rewriter, loc, signalType, stateName).getSignal();
+    }
 
     SensitiveOp sensitivity;
     for (auto candidate : ctor.getBodyBlock()->getOps<SensitiveOp>())
@@ -796,24 +1004,31 @@ void HWToSystemCPass::runOnOperation() {
   MLIRContext &context = getContext();
   ModuleOp module = getOperation();
 
-  // Prepare the modules for the conversion. The conversion only supports
-  // scalar ports and combinational operations, so flatten aggregate ports,
-  // lower aggregate operations to comb ops, and convert the remaining
-  // bitcasts. Port names use '_' as the join character to keep the generated
-  // C++ identifiers valid.
-  mlir::OpPassManager preparePM("builtin.module");
-  preparePM.addPass(
-      hw::createFlattenIO(hw::FlattenIOOptions{true, true, false, '_'}));
-  if (!structureOnly) {
-    auto &modulePM = preparePM.nestAny();
-    modulePM.addPass(hw::createHWAggregateToComb());
-    preparePM.addPass(hw::createHWConvertBitcasts());
-    // hw-convert-bitcasts may reintroduce aggregate ops, so lower them once
-    // more.
-    preparePM.nestAny().addPass(hw::createHWAggregateToComb());
+  if (!preparedInput) {
+    // Prepare the modules for the conversion. The conversion only supports
+    // scalar ports and combinational operations, so flatten aggregate ports,
+    // lower aggregate operations to comb ops, and convert the remaining
+    // bitcasts. Port names use '_' as the join character to keep the generated
+    // C++ identifiers valid.  A caller that needs to insert an interop
+    // instance between these stages can request --prepared-input and run the
+    // same preparation passes explicitly.
+    mlir::OpPassManager preparePM("builtin.module");
+    preparePM.addPass(
+        hw::createFlattenIO(hw::FlattenIOOptions{true, true, false, '_'}));
+    if (!structureOnly) {
+      auto &modulePM = preparePM.nestAny();
+      modulePM.addPass(hw::createHWAggregateToComb());
+      preparePM.addPass(hw::createHWConvertBitcasts());
+      // hw-convert-bitcasts may reintroduce aggregate ops, so lower them once
+      // more, then run bitcast conversion again. The second conversion is
+      // required for materializations introduced by aggregate lowering after
+      // the first bitcast pass.
+      preparePM.nestAny().addPass(hw::createHWAggregateToComb());
+      preparePM.addPass(hw::createHWConvertBitcasts());
+    }
+    if (failed(runPipeline(preparePM, module)))
+      return signalPassFailure();
   }
-  if (failed(runPipeline(preparePM, module)))
-    return signalPassFailure();
 
   if (structureOnly) {
     TypeConverter typeConverter;
@@ -851,6 +1066,10 @@ void HWToSystemCPass::runOnOperation() {
   populateTypeConversion(typeConverter);
   populateOpConversion(patterns, typeConverter);
 
-  if (failed(applyFullConversion(module, target, std::move(patterns))))
+  if (failed(applyFullConversion(module, target, std::move(patterns)))) {
     signalPassFailure();
+    return;
+  }
+
+  materializeWideAggregateValues(module);
 }
