@@ -296,6 +296,71 @@ static LogicalResult preLowerSequentialFeedbacks(
   return success();
 }
 
+// Materialize outputs of Verilator interop instances as SystemC channels
+// before moving the HW graph into an SSACFG function body.  Ready/valid paths
+// commonly form structural feedback between sibling instances.  Keeping those
+// edges as direct SSA uses would either make topological sorting fail or leave
+// a use-before-definition after an arbitrary ordering.  Signal reads/writes
+// preserve the module boundary and let SystemC delta cycles settle the network.
+static LogicalResult preLowerInteropChannels(
+    SCModuleOp scModule, SCFuncOp scFunc, ConversionPatternRewriter &rewriter,
+    const TypeConverter &typeConverter,
+    SmallVectorImpl<Value> &interopSignals) {
+  SmallVector<InteropVerilatedOp> interops;
+  scFunc.walk([&](InteropVerilatedOp op) { interops.push_back(op); });
+  if (interops.empty())
+    return success();
+
+  auto ctor = scModule.getOrCreateCtor(rewriter);
+  for (InteropVerilatedOp interop : interops) {
+    for (auto [index, result] : llvm::enumerate(interop.getResults())) {
+      Type convertedType = typeConverter.convertType(result.getType());
+      if (!convertedType)
+        return interop.emitError("failed to convert interop result type");
+
+      std::string requested = interop.getInstanceName().str();
+      requested += "_";
+      requested += interop.getResultName(index).getValue();
+      StringAttr channelName = getUniqueStateName(
+          scModule, getCxxIdentifier(rewriter.getStringAttr(requested), rewriter)
+                        .getValue(),
+          rewriter);
+
+      rewriter.setInsertionPoint(ctor);
+      Value channel =
+          SignalOp::create(rewriter, interop.getLoc(),
+                           SignalType::get(convertedType), channelName)
+              .getSignal();
+
+      rewriter.setInsertionPointAfter(interop);
+      Value converted = typeConverter.materializeTargetConversion(
+          rewriter, interop.getLoc(), convertedType, result);
+      if (!converted)
+        return interop.emitError(
+            "failed to materialize interop channel write");
+      auto write = SignalWriteOp::create(rewriter, interop.getLoc(), channel,
+                                         converted);
+
+      rewriter.setInsertionPointToStart(scFunc.getBodyBlock());
+      Value channelRead =
+          SignalReadOp::create(rewriter, interop.getLoc(), channel);
+      Value current = typeConverter.materializeSourceConversion(
+          rewriter, interop.getLoc(), result.getType(), channelRead);
+      if (!current)
+        return interop.emitError(
+            "failed to materialize interop channel read");
+
+      Operation *convertedOp = converted.getDefiningOp();
+      result.replaceUsesWithIf(current, [&](OpOperand &use) {
+        Operation *owner = use.getOwner();
+        return owner != convertedOp && owner != write.getOperation();
+      });
+      interopSignals.push_back(channel);
+    }
+  }
+  return success();
+}
+
 static Value findPreLoweredState(SCModuleOp module, StringAttr stateName) {
   if (!stateName)
     return {};
@@ -443,6 +508,10 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     if (failed(preLowerSequentialFeedbacks(
             scModule, scFunc, rewriter, *typeConverter, preLoweredStates)))
       return failure();
+    SmallVector<Value> interopSignals;
+    if (failed(preLowerInteropChannels(scModule, scFunc, rewriter,
+                                       *typeConverter, interopSignals)))
+      return failure();
 
     // HW module bodies are graph regions and may be printed in an order that
     // is legal there but not legal for the SSACFG body of systemc.func.  The
@@ -454,7 +523,7 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     // them out of the parent SSACFG topological ordering so legal hierarchy
     // feedback (A.out -> B.in -> B.out -> A.in) is represented by signals.
     auto isStructuralOperand = [](Value, Operation *definingOp) {
-      return isa<hw::InstanceOp>(definingOp);
+      return isa<hw::InstanceOp, systemc::InteropVerilatedOp>(definingOp);
     };
     if (!mlir::sortTopologically(scFunc.getBodyBlock(),
                                  isStructuralOperand)) {
@@ -477,6 +546,7 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
           return !isa<OutputType>(arg.getType());
         }));
     sensitivityValues.append(preLoweredStates.begin(), preLoweredStates.end());
+    sensitivityValues.append(interopSignals.begin(), interopSignals.end());
     if (!sensitivityValues.empty())
       SensitiveOp::create(rewriter, scModule.getLoc(), sensitivityValues);
 
