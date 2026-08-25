@@ -7,7 +7,8 @@ hw.module.extern @Leaf (in %a: i32, out c: i32)
 // CHECK: emitc.include "VLeaf.h"
 // CHECK: systemc.module @Top
 // CHECK: %{{.*}} = systemc.cpp.variable : !emitc.ptr<!emitc.opaque<"VLeaf">>
-// CHECK: systemc.cpp.new() : () -> !emitc.ptr<!emitc.opaque<"VLeaf">>
+// CHECK: "emitc.constant"()
+// CHECK: systemc.cpp.new(%{{.*}}) : (!emitc.opaque<"sc_core::sc_module_name">) -> !emitc.ptr<!emitc.opaque<"VLeaf">>
 // CHECK: systemc.cpp.assign {{.*}} = {{.*}}
 // CHECK: systemc.cpp.member_access {{.*}} arrow "eval"
 // CHECK: systemc.cpp.call_indirect

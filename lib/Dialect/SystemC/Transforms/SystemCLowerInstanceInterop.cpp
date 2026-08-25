@@ -13,9 +13,11 @@
 #include "circt/Dialect/Interop/InteropOps.h"
 #include "circt/Dialect/SystemC/SystemCOps.h"
 #include "circt/Dialect/SystemC/SystemCPasses.h"
+#include "mlir/Dialect/EmitC/IR/EmitC.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/STLExtras.h"
 
 namespace circt {
 namespace systemc {
@@ -52,20 +54,26 @@ public:
         emitc::OpaqueType::get(op->getContext(), verilatedModuleName));
     Location loc = op.getLoc();
 
-    // Include the C++ header produced by Verilator at the location of the HW
-    // module.
-    auto *hwModule =
-        SymbolTable::lookupNearestSymbolFrom(op, op.getModuleNameAttr());
-    OpBuilder includeBuilder(hwModule);
-    emitc::IncludeOp::create(includeBuilder, loc,
-                             (verilatedModuleName + ".h").str(), false);
+    // Include the C++ header produced by Verilator before every generated
+    // SystemC module.  Inserting it next to the referenced HW declaration can
+    // place it after a SystemC module that already uses the class.  Multiple
+    // instances of the same Verilated module also share one include.
+    auto topModule = op->getParentOfType<ModuleOp>();
+    std::string header = (verilatedModuleName + ".h").str();
+    bool alreadyIncluded = llvm::any_of(
+        topModule.getBody()->getOps<emitc::IncludeOp>(),
+        [&](emitc::IncludeOp include) { return include.getInclude() == header; });
+    if (!alreadyIncluded) {
+      OpBuilder includeBuilder = OpBuilder::atBlockBegin(topModule.getBody());
+      emitc::IncludeOp::create(includeBuilder, loc, header, false);
+    }
 
     // Request a pointer to the verilated module as persistent state.
     Value state = interop::ProceduralAllocOp::create(rewriter, loc, stateType,
                                                      InteropMechanism::CPP)
                       .getStates()[0];
 
-    insertStateInitialization(rewriter, loc, state);
+    insertStateInitialization(rewriter, loc, state, op.getInstanceName());
 
     ValueRange results = insertUpdateLogic(
         rewriter, loc, state, adaptor.getInputs(), op.getResults(),
@@ -83,13 +91,23 @@ private:
   /// Insert a interop init operation to allocate an instance of the verilated
   /// module on the heap and let the above requested pointer point to it.
   void insertStateInitialization(PatternRewriter &rewriter, Location loc,
-                                 Value state) const {
+                                 Value state, StringRef instanceName) const {
     auto initOp = interop::ProceduralInitOp::create(rewriter, loc, state,
                                                     InteropMechanism::CPP);
 
     OpBuilder initBuilder = OpBuilder::atBlockBegin(initOp.getBody());
+    std::string quotedName = "\"";
+    quotedName += instanceName;
+    quotedName += "\"";
+    Type stringType = emitc::OpaqueType::get(rewriter.getContext(),
+                                             "sc_core::sc_module_name");
+    quotedName.insert(0, "sc_core::sc_module_name(");
+    quotedName += ")";
+    Value name = emitc::ConstantOp::create(
+        initBuilder, loc, stringType,
+        emitc::OpaqueAttr::get(rewriter.getContext(), quotedName));
     Value newState =
-        NewOp::create(initBuilder, loc, state.getType(), ValueRange());
+        NewOp::create(initBuilder, loc, state.getType(), ValueRange{name});
     interop::ReturnOp::create(initBuilder, loc, newState);
   }
 

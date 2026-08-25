@@ -7,7 +7,8 @@ hw.module.extern @Empty ()
 hw.module @Foo (in %x: i32, out y: i32) {
   // CHECK-NEXT: [[STATE:%.+]] = interop.procedural.alloc cpp : !emitc.ptr<!emitc.opaque<"VBar">>
   // CHECK-NEXT: interop.procedural.init cpp [[STATE]] : !emitc.ptr<!emitc.opaque<"VBar">> {
-  // CHECK-NEXT:   [[V1:%.+]] = systemc.cpp.new() : () -> !emitc.ptr<!emitc.opaque<"VBar">>
+  // CHECK-NEXT:   [[NAME0:%.+]] = "emitc.constant"()
+  // CHECK-NEXT:   [[V1:%.+]] = systemc.cpp.new([[NAME0]]) : (!emitc.opaque<"sc_core::sc_module_name">) -> !emitc.ptr<!emitc.opaque<"VBar">>
   // CHECK-NEXT:   interop.return [[V1]] : !emitc.ptr<!emitc.opaque<"VBar">>
   // CHECK-NEXT: }
   // CHECK-NEXT: {{%.+}} = interop.procedural.update cpp [[[STATE]]] (%x, %x) : [!emitc.ptr<!emitc.opaque<"VBar">>] (i32, i32) -> i32 {
@@ -29,7 +30,8 @@ hw.module @Foo (in %x: i32, out y: i32) {
 
   // CHECK-NEXT: [[STATE2:%.+]] = interop.procedural.alloc cpp : !emitc.ptr<!emitc.opaque<"VEmpty">>
   // CHECK-NEXT: interop.procedural.init cpp [[STATE2]] : !emitc.ptr<!emitc.opaque<"VEmpty">> {
-  // CHECK-NEXT:   [[V6:%.+]] = systemc.cpp.new() : () -> !emitc.ptr<!emitc.opaque<"VEmpty">>
+  // CHECK-NEXT:   [[NAME1:%.+]] = "emitc.constant"()
+  // CHECK-NEXT:   [[V6:%.+]] = systemc.cpp.new([[NAME1]]) : (!emitc.opaque<"sc_core::sc_module_name">) -> !emitc.ptr<!emitc.opaque<"VEmpty">>
   // CHECK-NEXT:   interop.return [[V6]] : !emitc.ptr<!emitc.opaque<"VEmpty">>
   // CHECK-NEXT: }
   // CHECK-NEXT: interop.procedural.update cpp [[[STATE2]]] : [!emitc.ptr<!emitc.opaque<"VEmpty">>] () -> () {
