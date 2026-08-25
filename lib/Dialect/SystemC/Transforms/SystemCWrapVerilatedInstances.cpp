@@ -30,10 +30,11 @@ struct SystemCWrapVerilatedInstancesPass
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    SmallVector<hw::InstanceOp> instances;
-    module.walk([&](hw::InstanceOp instance) { instances.push_back(instance); });
+    SmallVector<hw::InstanceOp> instanceOps;
+    module.walk(
+        [&](hw::InstanceOp instance) { instanceOps.push_back(instance); });
 
-    for (hw::InstanceOp instance : instances) {
+    for (hw::InstanceOp instance : instanceOps) {
       Operation *target =
           SymbolTable::lookupNearestSymbolFrom(instance,
                                                instance.getModuleNameAttr());
@@ -45,13 +46,17 @@ struct SystemCWrapVerilatedInstancesPass
       }
 
       StringRef targetName = instance.getModuleName();
-      bool selected = modules.empty();
+      bool selected = modules.empty() && instances.empty();
       if (!modules.empty())
-        selected = llvm::is_contained(modules, targetName.str());
+        selected |= llvm::is_contained(modules, targetName.str());
+      if (!instances.empty())
+        selected |= llvm::is_contained(instances,
+                                       instance.getInstanceName().str());
 
       // With no explicit selection, only wrap Verilator leaves. An explicit
       // --modules list may name either an extern leaf or an internal module.
-      if (modules.empty() && !isa<hw::HWModuleExternOp>(target))
+      if (modules.empty() && instances.empty() &&
+          !isa<hw::HWModuleExternOp>(target))
         continue;
       if (!selected)
         continue;

@@ -40,6 +40,9 @@ def SystemCWrapVerilatedInstances : Pass<"systemc-wrap-verilated-instances",
   let options = [
     ListOption<"modules", "modules", "std::string",
                "HW module names to wrap; empty selects extern modules",
+               "llvm::cl::ZeroOrMore,">,
+    ListOption<"instances", "instances", "std::string",
+               "Instance names to wrap; may select internal HW modules",
                "llvm::cl::ZeroOrMore,">
   ];
   let dependentDialects = [

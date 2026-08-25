@@ -1,5 +1,6 @@
 // RUN: circt-opt --systemc-wrap-verilated-instances %s | FileCheck %s
 // RUN: circt-opt --systemc-wrap-verilated-instances="modules=Leaf" %s | FileCheck %s
+// RUN: circt-opt --systemc-wrap-verilated-instances="instances=leaf" %s | FileCheck %s
 
 hw.module.extern @Leaf (in %a: i32, out c: i32)
 
