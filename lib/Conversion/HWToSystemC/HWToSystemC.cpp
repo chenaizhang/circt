@@ -24,8 +24,8 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
@@ -289,7 +289,8 @@ static LogicalResult preLowerSequentialFeedbacks(
         rewriter, reg->getLoc(), reg->getResult(0).getType(), stateRead);
     if (!current)
       return reg->emitError("failed to materialize sequential state read");
-    for (Operation *user : llvm::make_early_inc_range(reg->getResult(0).getUsers()))
+    for (Operation *user :
+         llvm::make_early_inc_range(reg->getResult(0).getUsers()))
       user->replaceUsesOfWith(reg->getResult(0), current);
     stateSignals.push_back(state);
   }
@@ -302,10 +303,11 @@ static LogicalResult preLowerSequentialFeedbacks(
 // edges as direct SSA uses would either make topological sorting fail or leave
 // a use-before-definition after an arbitrary ordering.  Signal reads/writes
 // preserve the module boundary and let SystemC delta cycles settle the network.
-static LogicalResult preLowerInteropChannels(
-    SCModuleOp scModule, SCFuncOp scFunc, ConversionPatternRewriter &rewriter,
-    const TypeConverter &typeConverter,
-    SmallVectorImpl<Value> &interopSignals) {
+static LogicalResult
+preLowerInteropChannels(SCModuleOp scModule, SCFuncOp scFunc,
+                        ConversionPatternRewriter &rewriter,
+                        const TypeConverter &typeConverter,
+                        SmallVectorImpl<Value> &interopSignals) {
   SmallVector<InteropVerilatedOp> interops;
   scFunc.walk([&](InteropVerilatedOp op) { interops.push_back(op); });
   if (interops.empty())
@@ -322,8 +324,9 @@ static LogicalResult preLowerInteropChannels(
       requested += "_";
       requested += interop.getResultName(index).getValue();
       StringAttr channelName = getUniqueStateName(
-          scModule, getCxxIdentifier(rewriter.getStringAttr(requested), rewriter)
-                        .getValue(),
+          scModule,
+          getCxxIdentifier(rewriter.getStringAttr(requested), rewriter)
+              .getValue(),
           rewriter);
 
       rewriter.setInsertionPoint(ctor);
@@ -336,10 +339,9 @@ static LogicalResult preLowerInteropChannels(
       Value converted = typeConverter.materializeTargetConversion(
           rewriter, interop.getLoc(), convertedType, result);
       if (!converted)
-        return interop.emitError(
-            "failed to materialize interop channel write");
-      auto write = SignalWriteOp::create(rewriter, interop.getLoc(), channel,
-                                         converted);
+        return interop.emitError("failed to materialize interop channel write");
+      auto write =
+          SignalWriteOp::create(rewriter, interop.getLoc(), channel, converted);
 
       rewriter.setInsertionPointToStart(scFunc.getBodyBlock());
       Value channelRead =
@@ -347,8 +349,7 @@ static LogicalResult preLowerInteropChannels(
       Value current = typeConverter.materializeSourceConversion(
           rewriter, interop.getLoc(), result.getType(), channelRead);
       if (!current)
-        return interop.emitError(
-            "failed to materialize interop channel read");
+        return interop.emitError("failed to materialize interop channel read");
 
       Operation *convertedOp = converted.getDefiningOp();
       result.replaceUsesWithIf(current, [&](OpOperand &use) {
@@ -371,12 +372,12 @@ static Value findPreLoweredState(SCModuleOp module, StringAttr stateName) {
 }
 
 // ExportSystemC represents combinational values as inline expressions.  A
-// wide packed mux/extract chain can otherwise duplicate the same 768-bit
-// expression at every leaf and grow exponentially.  Materialize the wide
-// aggregate glue once as a C++ local variable; the existing comb emitters
-// still provide the initializer expression, while all later users refer to a
-// stable name.
-static void materializeWideAggregateValues(ModuleOp module) {
+// packed mux/extract chain can otherwise duplicate the same expression at
+// every leaf and grow exponentially. Materialize shared aggregate values and
+// moderately wide aggregate glue once as C++ local variables. Existing comb
+// emitters still provide the initializer expression, while all later users
+// refer to a stable name.
+static void materializeAggregateValues(ModuleOp module) {
   module.walk([&](SCFuncOp func) {
     SmallVector<Operation *> wideOps;
     func.walk([&](Operation *op) {
@@ -384,7 +385,8 @@ static void materializeWideAggregateValues(ModuleOp module) {
           op->getNumResults() != 1)
         return;
       auto integer = dyn_cast<IntegerType>(op->getResult(0).getType());
-      if (integer && integer.getWidth() > 512)
+      if (integer &&
+          (integer.getWidth() >= 128 || !op->getResult(0).hasOneUse()))
         wideOps.push_back(op);
     });
 
@@ -394,23 +396,22 @@ static void materializeWideAggregateValues(ModuleOp module) {
         continue;
       OpBuilder builder(op->getContext());
       builder.setInsertionPointAfter(op);
-      auto name = builder.getStringAttr("wide_tmp_" +
-                                       std::to_string(nextName++));
+      auto name =
+          builder.getStringAttr("wide_tmp_" + std::to_string(nextName++));
       unsigned width = cast<IntegerType>(op->getResult(0).getType()).getWidth();
       Type vectorType = BitVectorType::get(op->getContext(), width);
       Value init = ConvertOp::create(builder, op->getLoc(), vectorType,
                                      op->getResult(0));
-      auto variable = VariableOp::create(builder, op->getLoc(), vectorType,
-                                         name, init);
-      Value source = ConvertOp::create(builder, op->getLoc(),
-                                       op->getResult(0).getType(),
-                                       variable.getVariable());
-      op->getResult(0).replaceUsesWithIf(
-          source, [&](OpOperand &use) {
-            return use.getOwner() != init.getDefiningOp() &&
-                   use.getOwner() != variable.getOperation() &&
-                   use.getOwner() != source.getDefiningOp();
-          });
+      auto variable =
+          VariableOp::create(builder, op->getLoc(), vectorType, name, init);
+      Value source =
+          ConvertOp::create(builder, op->getLoc(), op->getResult(0).getType(),
+                            variable.getVariable());
+      op->getResult(0).replaceUsesWithIf(source, [&](OpOperand &use) {
+        return use.getOwner() != init.getDefiningOp() &&
+               use.getOwner() != variable.getOperation() &&
+               use.getOwner() != source.getDefiningOp();
+      });
     }
   });
 }
@@ -505,8 +506,8 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     rewriter.inlineRegionBefore(module.getBody(), scFuncBody, scFuncBody.end());
 
     SmallVector<Value> preLoweredStates;
-    if (failed(preLowerSequentialFeedbacks(
-            scModule, scFunc, rewriter, *typeConverter, preLoweredStates)))
+    if (failed(preLowerSequentialFeedbacks(scModule, scFunc, rewriter,
+                                           *typeConverter, preLoweredStates)))
       return failure();
     SmallVector<Value> interopSignals;
     if (failed(preLowerInteropChannels(scModule, scFunc, rewriter,
@@ -525,8 +526,7 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     auto isStructuralOperand = [](Value, Operation *definingOp) {
       return isa<hw::InstanceOp, systemc::InteropVerilatedOp>(definingOp);
     };
-    if (!mlir::sortTopologically(scFunc.getBodyBlock(),
-                                 isStructuralOperand)) {
+    if (!mlir::sortTopologically(scFunc.getBodyBlock(), isStructuralOperand)) {
       auto diagnostic = emitError(
           module->getLoc(),
           "cannot order HW body before SystemC conversion; unresolved "
@@ -662,8 +662,8 @@ public:
     // Generate blocks commonly introduce names such as
     // `gen_overflow_sync_0.syn_overflow_inst`, where '.' is legal in RTL but
     // not in a SystemC member declaration.
-    auto instanceName = getCxxIdentifier(instanceOp.getInstanceNameAttr(),
-                                         rewriter);
+    auto instanceName =
+        getCxxIdentifier(instanceOp.getInstanceNameAttr(), rewriter);
     auto instModuleName = instanceOp.getModuleNameAttr();
 
     // Declare the instance.
@@ -847,14 +847,15 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
         reg->template getAttrOfType<StringAttr>("systemc.prelowered_state");
     StringAttr stateName;
     if (!preLoweredName)
-      stateName = getUniqueStateName(scModule, reg.getName().value_or(""),
-                                     rewriter);
+      stateName =
+          getUniqueStateName(scModule, reg.getName().value_or(""), rewriter);
 
     auto ctor = scModule.getOrCreateCtor(rewriter);
     Value state = findPreLoweredState(scModule, preLoweredName);
     if (!state) {
       rewriter.setInsertionPoint(ctor);
-      state = SignalOp::create(rewriter, loc, signalType, stateName).getSignal();
+      state =
+          SignalOp::create(rewriter, loc, signalType, stateName).getSignal();
     }
 
     // Re-run the method after the signal update delta cycle so combinational
@@ -932,7 +933,8 @@ struct ConvertFirReg : public OpConversionPattern<seq::FirRegOp> {
     Value state = findPreLoweredState(scModule, preLoweredName);
     if (!state) {
       rewriter.setInsertionPoint(ctor);
-      state = SignalOp::create(rewriter, loc, signalType, stateName).getSignal();
+      state =
+          SignalOp::create(rewriter, loc, signalType, stateName).getSignal();
     }
 
     SensitiveOp sensitivity;
@@ -1141,5 +1143,5 @@ void HWToSystemCPass::runOnOperation() {
     return;
   }
 
-  materializeWideAggregateValues(module);
+  materializeAggregateValues(module);
 }

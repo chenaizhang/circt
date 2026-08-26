@@ -60,12 +60,31 @@ public:
     // instances of the same Verilated module also share one include.
     auto topModule = op->getParentOfType<ModuleOp>();
     std::string header = (verilatedModuleName + ".h").str();
-    bool alreadyIncluded = llvm::any_of(
-        topModule.getBody()->getOps<emitc::IncludeOp>(),
-        [&](emitc::IncludeOp include) { return include.getInclude() == header; });
+    bool alreadyIncluded =
+        llvm::any_of(topModule.getBody()->getOps<emitc::IncludeOp>(),
+                     [&](emitc::IncludeOp include) {
+                       return include.getInclude() == header;
+                     });
     if (!alreadyIncluded) {
       OpBuilder includeBuilder = OpBuilder::atBlockBegin(topModule.getBody());
       emitc::IncludeOp::create(includeBuilder, loc, header, false);
+    }
+    auto isWide = [](Type type) {
+      auto width = systemc::getBitWidth(type);
+      return width && *width > 64;
+    };
+    if (llvm::any_of(adaptor.getInputs().getTypes(), isWide) ||
+        llvm::any_of(op.getResultTypes(), isWide)) {
+      constexpr StringLiteral wideHeader = "circt_systemc_verilator_wide.h";
+      bool wideHeaderIncluded =
+          llvm::any_of(topModule.getBody()->getOps<emitc::IncludeOp>(),
+                       [&](emitc::IncludeOp include) {
+                         return include.getInclude() == wideHeader;
+                       });
+      if (!wideHeaderIncluded) {
+        OpBuilder includeBuilder = OpBuilder::atBlockBegin(topModule.getBody());
+        emitc::IncludeOp::create(includeBuilder, loc, wideHeader, false);
+      }
     }
 
     // Request a pointer to the verilated module as persistent state.
@@ -88,6 +107,18 @@ public:
   }
 
 private:
+  Type getWideSystemCType(Type type) const {
+    auto integer = dyn_cast<IntegerType>(type);
+    if (!integer || integer.getWidth() <= 64)
+      return type;
+    if (integer.getWidth() <= 512) {
+      if (integer.isSigned())
+        return BigIntType::get(type.getContext(), integer.getWidth());
+      return BigUIntType::get(type.getContext(), integer.getWidth());
+    }
+    return BitVectorType::get(type.getContext(), integer.getWidth());
+  }
+
   /// Insert a interop init operation to allocate an instance of the verilated
   /// module on the heap and let the above requested pointer point to it.
   void insertStateInitialization(PatternRewriter &rewriter, Location loc,
@@ -99,10 +130,11 @@ private:
     std::string quotedName = "\"";
     quotedName += instanceName;
     quotedName += "\"";
-    Type stringType = emitc::OpaqueType::get(rewriter.getContext(),
-                                             "sc_core::sc_module_name");
-    quotedName.insert(0, "sc_core::sc_module_name(");
-    quotedName += ")";
+    // `systemc.interop.verilated` calls a plain Verilator `--cc` model.  Such
+    // models accept `const char *`, while the `sc_core::sc_module_name` type is
+    // specific to Verilator's separate `--sc` wrapper ABI.
+    Type stringType = emitc::PointerType::get(
+        emitc::OpaqueType::get(rewriter.getContext(), "const char"));
     Value name = emitc::ConstantOp::create(
         initBuilder, loc, stringType,
         emitc::OpaqueAttr::get(rewriter.getContext(), quotedName));
@@ -127,11 +159,28 @@ private:
     // Write to the verilated module's input ports.
     Value state = updateOp.getBody()->getArguments().front();
     for (size_t i = 0; i < inputValues.size(); ++i) {
+      auto width = systemc::getBitWidth(inputValues[i].getType());
+      Type memberType = inputValues[i].getType();
+      if (width && *width > 64) {
+        unsigned words = (*width + 31) / 32;
+        memberType =
+            emitc::OpaqueType::get(updateBuilder.getContext(),
+                                   "VlWide<" + std::to_string(words) + ">");
+      }
       Value member = MemberAccessOp::create(
-          updateBuilder, loc, inputValues[i].getType(), state,
+          updateBuilder, loc, memberType, state,
           cast<StringAttr>(inputNames[i]), MemberAccessKind::Arrow);
-      AssignOp::create(updateBuilder, loc, member,
-                       updateOp.getBody()->getArgument(i + 1));
+      if (width && *width > 64) {
+        Value source = updateOp.getBody()->getArgument(i + 1);
+        Type systemCType = getWideSystemCType(source.getType());
+        if (source.getType() != systemCType)
+          source = ConvertOp::create(updateBuilder, loc, systemCType, source);
+        CallOpaqueOp::create(updateBuilder, loc, "circt_systemc::assign_wide",
+                             TypeRange{}, ValueRange{member, source});
+      } else {
+        AssignOp::create(updateBuilder, loc, member,
+                         updateOp.getBody()->getArgument(i + 1));
+      }
     }
 
     // Call 'eval'.
@@ -145,10 +194,32 @@ private:
     // Read the verilated module's output ports.
     SmallVector<Value> results;
     for (size_t i = 0; i < resultValues.size(); ++i) {
-      results.push_back(MemberAccessOp::create(
-          updateBuilder, loc, resultValues[i].getType(), state,
-          cast<StringAttr>(resultNames[i]).getValue(),
-          MemberAccessKind::Arrow));
+      auto width = systemc::getBitWidth(resultValues[i].getType());
+      if (width && *width > 64) {
+        unsigned words = (*width + 31) / 32;
+        Type memberType =
+            emitc::OpaqueType::get(updateBuilder.getContext(),
+                                   "VlWide<" + std::to_string(words) + ">");
+        Value member =
+            MemberAccessOp::create(updateBuilder, loc, memberType, state,
+                                   cast<StringAttr>(resultNames[i]).getValue(),
+                                   MemberAccessKind::Arrow);
+        Type systemCType = getWideSystemCType(resultValues[i].getType());
+        auto read = CallOpaqueOp::create(
+            updateBuilder, loc,
+            "circt_systemc::read_wide<" + std::to_string(*width) + ">",
+            TypeRange{systemCType}, ValueRange{member});
+        Value result = read.getResult(0);
+        if (result.getType() != resultValues[i].getType())
+          result = ConvertOp::create(updateBuilder, loc,
+                                     resultValues[i].getType(), result);
+        results.push_back(result);
+      } else {
+        results.push_back(MemberAccessOp::create(
+            updateBuilder, loc, resultValues[i].getType(), state,
+            cast<StringAttr>(resultNames[i]).getValue(),
+            MemberAccessKind::Arrow));
+      }
     }
 
     interop::ReturnOp::create(updateBuilder, loc, results);

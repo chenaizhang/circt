@@ -314,6 +314,35 @@ def CallIndirectOp : SystemCOp<"cpp.call_indirect", [
   let hasVerifier = 1;
 }
 
+def CallOpaqueOp : SystemCOp<"cpp.call_opaque", []> {
+  let summary = "call an external C++ function";
+  let description = [{
+    Calls an external C++ function identified by its textual name. Unlike the
+    EmitC call operation, this operation accepts SystemC dialect types. This is
+    useful for helper functions at interoperability boundaries, where values
+    such as `sc_biguint` have to cross into ordinary C++ code.
+  }];
+
+  let arguments = (ins StrAttr:$callee, Variadic<AnyType>:$callee_operands);
+  let results = (outs Variadic<AnyType>:$results);
+
+  let builders = [
+    OpBuilder<(ins "StringRef":$callee, "TypeRange":$resultTypes,
+                   CArg<"ValueRange", "{}">:$operands), [{
+      $_state.addAttribute("callee", $_builder.getStringAttr(callee));
+      $_state.addOperands(operands);
+      $_state.addTypes(resultTypes);
+    }]>
+  ];
+
+  let assemblyFormat = [{
+    $callee `(` $callee_operands `)` attr-dict `:`
+      functional-type($callee_operands, $results)
+  }];
+
+  let hasVerifier = 1;
+}
+
 def CallOp : SystemCOp<"cpp.call", [
   CallOpInterface,
   DeclareOpInterfaceMethods<SymbolUserOpInterface>

@@ -37,9 +37,8 @@ struct SystemCWrapVerilatedInstancesPass
         [&](hw::InstanceOp instance) { instanceOps.push_back(instance); });
 
     for (hw::InstanceOp instance : instanceOps) {
-      Operation *target =
-          SymbolTable::lookupNearestSymbolFrom(instance,
-                                               instance.getModuleNameAttr());
+      Operation *target = SymbolTable::lookupNearestSymbolFrom(
+          instance, instance.getModuleNameAttr());
       if (!target) {
         instance.emitError("cannot find referenced HW module ")
             << instance.getModuleName();
@@ -52,8 +51,8 @@ struct SystemCWrapVerilatedInstancesPass
       if (!modules.empty())
         selected |= llvm::is_contained(modules, targetName.str());
       if (!instances.empty())
-        selected |= llvm::is_contained(instances,
-                                       instance.getInstanceName().str());
+        selected |=
+            llvm::is_contained(instances, instance.getInstanceName().str());
 
       // With no explicit selection, only wrap Verilator leaves. An explicit
       // --modules list may name either an extern leaf or an internal module.
@@ -70,7 +69,21 @@ struct SystemCWrapVerilatedInstancesPass
         return;
       }
       if (!instance.getParameters().empty()) {
-        instance.emitError("parameterized Verilator instances are not supported");
+        instance.emitError(
+            "parameterized Verilator instances are not supported");
+        signalPassFailure();
+        return;
+      }
+      auto hasAggregatePort = [](Type type) {
+        return hw::type_isa<hw::ArrayType, hw::UnpackedArrayType,
+                            hw::StructType>(type);
+      };
+      if (llvm::any_of(instance->getOperandTypes(), hasAggregatePort) ||
+          llvm::any_of(instance->getResultTypes(), hasAggregatePort)) {
+        instance.emitError(
+            "Verilator interop requires a scalar port ABI; run hw-flatten-io "
+            "before systemc-wrap-verilated-instances and compile the "
+            "Verilator model from the flattened SystemVerilog");
         signalPassFailure();
         return;
       }
@@ -98,8 +111,8 @@ struct SystemCWrapVerilatedInstancesPass
     for (hw::HWModuleOp target : modulesToExternalize) {
       OpBuilder builder(target);
       SmallVector<NamedAttribute> attrs;
-      if (auto visibility =
-              target->getAttrOfType<StringAttr>(SymbolTable::getVisibilityAttrName()))
+      if (auto visibility = target->getAttrOfType<StringAttr>(
+              SymbolTable::getVisibilityAttrName()))
         attrs.emplace_back(SymbolTable::getVisibilityAttrName(), visibility);
       auto ext = hw::HWModuleExternOp::create(
           builder, target.getLoc(), target.getNameAttr(), target.getPortList(),

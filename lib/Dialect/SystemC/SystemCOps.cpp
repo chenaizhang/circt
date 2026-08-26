@@ -825,6 +825,14 @@ LogicalResult CallIndirectOp::verify() {
   return success();
 }
 
+LogicalResult CallOpaqueOp::verify() {
+  if (getNumResults() > 1)
+    return emitOpError(
+        "incorrect number of function results (always has to be 0 or 1)");
+
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // FuncOp
 //

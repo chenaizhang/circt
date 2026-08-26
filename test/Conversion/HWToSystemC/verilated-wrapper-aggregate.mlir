@@ -13,7 +13,7 @@
 // CHECK: hw.module.extern @Leaf
 // CHECK: systemc.module @Top
 // CHECK: "emitc.constant"()
-// CHECK: systemc.cpp.new(%{{.*}}) : (!emitc.opaque<"sc_core::sc_module_name">) -> !emitc.ptr<!emitc.opaque<"VLeaf">>
+// CHECK: systemc.cpp.new(%{{.*}}) : (!emitc.ptr<!emitc.opaque<"const char">>) -> !emitc.ptr<!emitc.opaque<"VLeaf">>
 // CHECK-NOT: !hw.array
 hw.module @Leaf(in %a: !hw.array<2xi8>, out y: !hw.array<2xi8>) {
   hw.output %a : !hw.array<2xi8>

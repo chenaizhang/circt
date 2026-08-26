@@ -565,6 +565,39 @@ private:
   }
 };
 
+/// Emit a call to an external C++ helper. This mirrors the subset of
+/// emitc.call_opaque used by the SystemC lowering, but deliberately accepts
+/// SystemC dialect values such as sc_biguint.
+class CallOpaqueEmitter : public OpEmissionPattern<CallOpaqueOp> {
+  using OpEmissionPattern::OpEmissionPattern;
+
+  MatchResult matchInlinable(Value value) override {
+    if (value.getDefiningOp<CallOpaqueOp>())
+      return Precedence::FUNCTION_CALL;
+    return {};
+  }
+
+  void emitInlined(Value value, EmissionPrinter &p) override {
+    printCall(value.getDefiningOp<CallOpaqueOp>(), p);
+  }
+
+  void emitStatement(CallOpaqueOp op, EmissionPrinter &p) override {
+    if (op.getNumResults() > 0)
+      return;
+    printCall(op, p);
+    p << ";\n";
+  }
+
+private:
+  void printCall(CallOpaqueOp op, EmissionPrinter &p) {
+    p << op.getCallee() << "(";
+    llvm::interleaveComma(op.getCalleeOperands(), p, [&](auto arg) {
+      p.getInlinable(arg).emitWithParensOnLowerPrecedence(Precedence::COMMA);
+    });
+    p << ")";
+  }
+};
+
 /// Emit a systemc.cpp.return operation.
 struct ReturnEmitter : OpEmissionPattern<ReturnOp> {
   using OpEmissionPattern::OpEmissionPattern;
@@ -643,8 +676,8 @@ void circt::ExportSystemC::populateSystemCOpEmitters(
                AssignEmitter, VariableEmitter, NewEmitter, DestructorEmitter,
                DeleteEmitter, MemberAccessEmitter,
                // Function related emitters
-               FuncEmitter, ReturnEmitter, CallEmitter, CallIndirectEmitter>(
-      context);
+               FuncEmitter, ReturnEmitter, CallEmitter, CallIndirectEmitter,
+               CallOpaqueEmitter>(context);
 }
 
 void circt::ExportSystemC::populateSystemCTypeEmitters(
