@@ -50,7 +50,7 @@ jobs:
       - name: Build
         run: |
           cmake --build build \
-            --target circt-opt circt-translate circt-verilog FileCheck not \
+            --target circt-opt circt-translate circt-verilog FileCheck count not \
             --parallel 4
 
       - name: Test
