@@ -2,7 +2,7 @@
 
 该目录验证完整链路：
 
-1. `Leaf.sv` 由 Verilator `--cc` 生成 `VLeaf.h` 和静态库；
+1. `../Inputs/verilated-mixed/Leaf.sv` 由 Verilator `--cc` 生成 `VLeaf.h` 和静态库；
 2. CIRCT 将 `hw.instance` 自动包装为 `systemc.interop.verilated`；
 3. `HW → SystemC`、实例侧和容器侧 lowering 生成 `Top.h`；
 4. SystemC 测试台链接 `VLeaf`，运行两组输入并检查输出。

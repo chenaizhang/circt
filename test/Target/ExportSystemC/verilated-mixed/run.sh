@@ -18,7 +18,7 @@ rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/verilated" "$WORK_DIR/generated"
 
 verilator --cc --Mdir "$WORK_DIR/verilated" --top-module Leaf \
-  "$ROOT/Leaf.sv"
+  "$ROOT/../Inputs/verilated-mixed/Leaf.sv"
 make -C "$WORK_DIR/verilated" -f VLeaf.mk VLeaf__ALL.a
 
 cat > "$WORK_DIR/input.mlir" <<'MLIR'

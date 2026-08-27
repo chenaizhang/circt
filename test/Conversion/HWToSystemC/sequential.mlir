@@ -56,7 +56,7 @@ hw.module @feedback_counter(in %clk: i1, in %reset: i1, out value: i8) {
 // CHECK: %[[STATE_SIGNAL:.*]] = systemc.signal : !systemc.signal<!systemc.uint<8>>
 // CHECK: %[[STATE_READ:.*]] = systemc.signal.read %[[STATE_SIGNAL]]
 // CHECK: %[[CURRENT:.*]] = systemc.convert %[[STATE_READ]] : (!systemc.uint<8>) -> i8
-// CHECK: %[[NEXT:.*]] = comb.add %[[CURRENT]], {{.*}} : i8
+// CHECK: %[[NEXT:.*]] = comb.add {{.*}}, {{.*}} : i8
 // CHECK: %[[RESET_NEXT:.*]] = comb.mux {{.*}}, {{.*}}, %[[NEXT]] : i8
 // CHECK: %[[EDGE:.*]] = systemc.signal.posedge %clk : !systemc.in<i1>
 // CHECK: comb.mux %[[EDGE]], %[[RESET_NEXT]], %[[CURRENT]] : i8

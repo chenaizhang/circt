@@ -146,8 +146,9 @@ systemc.module @signalFuncNameConflict () {
 
 // -----
 
-systemc.module @cannotReadFromOutPort (%port0: !systemc.out<i32>) {
-  // expected-error @+1 {{operand #0 must be a SystemC sc_in<T> type or a SystemC sc_inout<T> type or a SystemC sc_signal<T> type, but got '!systemc.out<i32>'}}
+// sc_out derives from sc_inout and exposes read(), so output ports are valid
+// signal.read sources.
+systemc.module @canReadFromOutPort (%port0: !systemc.out<i32>) {
   %0 = systemc.signal.read %port0 : !systemc.out<i32>
 }
 
