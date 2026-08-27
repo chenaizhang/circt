@@ -1,0 +1,75 @@
+name: SystemC backend Linux binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: Run CIRCT tests before packaging
+        required: false
+        default: true
+        type: boolean
+  push:
+    tags:
+      - 'systemc-backend-*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout CIRCT and LLVM
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build python3 zlib1g-dev libzstd-dev
+
+      - name: Configure
+        run: |
+          cmake -G Ninja -S llvm/llvm -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DLLVM_BUILD_TOOLS=ON \
+            -DLLVM_BUILD_EXAMPLES=OFF \
+            -DLLVM_ENABLE_PROJECTS=mlir \
+            -DLLVM_EXTERNAL_PROJECTS=circt \
+            -DLLVM_EXTERNAL_CIRCT_SOURCE_DIR="$PWD" \
+            -DLLVM_TARGETS_TO_BUILD=host \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DCIRCT_SLANG_FRONTEND_ENABLED=ON \
+            -DCMAKE_INSTALL_PREFIX="$PWD/install"
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Test
+        if: inputs.run_tests || github.ref_type == 'tag'
+        run: cmake --build build --target check-circt check-circt-unit --parallel 2
+
+      - name: Install and package
+        run: |
+          cmake --build build --target install --parallel 2
+          tar -C install -czf "circt-systemc-${GITHUB_SHA}-linux-x86_64.tar.gz" .
+          sha256sum "circt-systemc-${GITHUB_SHA}-linux-x86_64.tar.gz" > "circt-systemc-${GITHUB_SHA}-linux-x86_64.tar.gz.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: circt-systemc-linux-x86_64
+          path: |
+            circt-systemc-*.tar.gz
+            circt-systemc-*.sha256
+
+      - name: Upload release assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            circt-systemc-*.tar.gz
+            circt-systemc-*.sha256
