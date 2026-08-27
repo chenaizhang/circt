@@ -15,6 +15,8 @@ hw.module @someModule(inout %in0: i32) {}
 // expected-error @+2 {{cannot order HW body before SystemC conversion; unresolved dependency cycle remains after sequential state extraction}}
 // expected-error @+1 {{failed to legalize operation 'hw.module'}}
 hw.module @graphRegionToSSACFG(in %in0: i32) {
+    // expected-note @+1 {{operation in unresolved dependency cycle: comb.add}}
     %0 = comb.add %in0, %1 : i32
+    // expected-note @+1 {{operation in unresolved dependency cycle: comb.add}}
     %1 = comb.add %in0, %0 : i32
 }

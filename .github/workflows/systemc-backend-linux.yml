@@ -53,6 +53,18 @@ jobs:
             --target circt-opt circt-translate circt-verilog FileCheck count not \
             --parallel 4
 
+      - name: Preserve compiled tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: circt-systemc-tools-${{ github.sha }}
+          path: |
+            build/bin/circt-opt
+            build/bin/circt-translate
+            build/bin/circt-verilog
+            build/bin/FileCheck
+            build/bin/count
+            build/bin/not
+
       - name: Test
         if: inputs.run_tests || github.ref_type == 'tag'
         run: |
