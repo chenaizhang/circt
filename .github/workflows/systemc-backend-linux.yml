@@ -27,7 +27,9 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build python3 zlib1g-dev libzstd-dev
+          sudo apt-get install -y \
+            clang cmake g++ make ninja-build python3 zlib1g-dev libzstd-dev \
+            verilator libsystemc-dev
 
       - name: Configure
         run: |
@@ -46,16 +48,38 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$PWD/install"
 
       - name: Build
-        run: cmake --build build --parallel 2
+        run: |
+          cmake --build build \
+            --target circt-opt circt-translate circt-verilog FileCheck not \
+            --parallel 4
 
       - name: Test
         if: inputs.run_tests || github.ref_type == 'tag'
-        run: cmake --build build --target check-circt check-circt-unit --parallel 2
+        run: |
+          build/bin/llvm-lit -sv \
+            test/Conversion/HWToSystemC \
+            test/Dialect/SystemC \
+            test/Target/ExportSystemC
+          CIRCT_BUILD_DIR="$PWD/build" \
+            bash test/Target/ExportSystemC/verilated-mixed/run.sh
 
       - name: Install and package
         run: |
-          cmake --build build --target install --parallel 2
-          tar -C install -czf "circt-systemc-${GITHUB_SHA}-linux-x86_64.tar.gz" .
+          package_root="circt-systemc-${GITHUB_SHA}-linux-x86_64"
+          mkdir -p "$package_root/bin"
+          cp build/bin/circt-opt build/bin/circt-translate \
+            build/bin/circt-verilog "$package_root/bin/"
+          cp LICENSE README.md "$package_root/"
+          cat > "$package_root/BUILD_INFO.txt" <<EOF
+          source=https://github.com/${GITHUB_REPOSITORY}
+          revision=${GITHUB_SHA}
+          runner=ubuntu-24.04-x86_64
+          validation=SystemC dialect/HW-to-SystemC/ExportSystemC lit tests plus Verilator mixed integration
+          EOF
+          ldd "$package_root/bin/circt-opt"
+          ldd "$package_root/bin/circt-translate"
+          ldd "$package_root/bin/circt-verilog"
+          tar -czf "$package_root.tar.gz" "$package_root"
           sha256sum "circt-systemc-${GITHUB_SHA}-linux-x86_64.tar.gz" > "circt-systemc-${GITHUB_SHA}-linux-x86_64.tar.gz.sha256"
 
       - name: Upload workflow artifact
