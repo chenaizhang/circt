@@ -27,7 +27,10 @@ hw.module @Right(in %valid: i1, out ready: i1) {
 hw.module @FeedbackTop(in %seed: i1, out done: i1) {
   %valid = hw.instance "left" @Left(ready: %ready: i1) -> (valid: i1)
   %valid2 = hw.instance "left2" @Left(ready: %ready: i1) -> (valid: i1)
-  %ready = hw.instance "right" @Right(valid: %valid: i1) -> (ready: i1)
+  // Keep the producer textually after its interop user. The HW graph region
+  // permits this, but the generated SystemC SSACFG must reorder the glue
+  // expression before Right's executable update call.
+  %ready = hw.instance "right" @Right(valid: %combined: i1) -> (ready: i1)
   %combined = comb.xor %valid, %valid2 : i1
   %done = comb.xor %ready, %combined, %seed : i1
   hw.output %done : i1

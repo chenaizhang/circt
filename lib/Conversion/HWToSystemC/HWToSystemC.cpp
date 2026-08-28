@@ -399,6 +399,21 @@ static void materializeAggregateValues(ModuleOp module) {
       auto name =
           builder.getStringAttr("wide_tmp_" + std::to_string(nextName++));
       unsigned width = cast<IntegerType>(op->getResult(0).getType()).getWidth();
+      // Keep one-bit shared glue as a native boolean.  Materializing it as an
+      // sc_bv<1> makes the later conversion back to i1 emit `bool(sc_bv<1>)`,
+      // which is not a valid SystemC conversion and in particular breaks
+      // assignments to scalar Verilator ports.  Wider packed glue remains a
+      // bit vector so aggregate concatenation/extraction is evaluated once.
+      if (width == 1) {
+        auto variable = VariableOp::create(builder, op->getLoc(),
+                                           op->getResult(0).getType(), name,
+                                           op->getResult(0));
+        op->getResult(0).replaceUsesWithIf(
+            variable.getVariable(), [&](OpOperand &use) {
+              return use.getOwner() != variable.getOperation();
+            });
+        continue;
+      }
       Type vectorType = BitVectorType::get(op->getContext(), width);
       Value init = ConvertOp::create(builder, op->getLoc(), vectorType,
                                      op->getResult(0));
@@ -523,8 +538,14 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     // not expressions that must be evaluated in the parent's SC_METHOD. Keep
     // them out of the parent SSACFG topological ordering so legal hierarchy
     // feedback (A.out -> B.in -> B.out -> A.in) is represented by signals.
-    auto isStructuralOperand = [](Value, Operation *definingOp) {
-      return isa<hw::InstanceOp, systemc::InteropVerilatedOp>(definingOp);
+    auto isStructuralOperand = [](Value, Operation *user) {
+      // Native HW instances become declarations and port bindings, so their
+      // operands are structural. Verilator interop instances instead become
+      // executable update calls inside this SC_METHOD. Their inputs must
+      // participate in the ordering after preLowerInteropChannels has cut
+      // feedback through SystemC signals; otherwise derived glue expressions
+      // can remain after the update call and later lower to null operands.
+      return isa<hw::InstanceOp>(user);
     };
     if (!mlir::sortTopologically(scFunc.getBodyBlock(), isStructuralOperand)) {
       auto diagnostic = emitError(
