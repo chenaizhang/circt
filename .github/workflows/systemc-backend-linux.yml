@@ -69,6 +69,7 @@ jobs:
         if: inputs.run_tests || github.ref_type == 'tag'
         run: |
           build/bin/llvm-lit -sv \
+            test/Dialect/HW/extract-hierarchy-slice.mlir \
             test/Conversion/HWToSystemC \
             test/Dialect/SystemC \
             test/Target/ExportSystemC

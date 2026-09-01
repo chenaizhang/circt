@@ -27,6 +27,31 @@ def PrintHWModuleGraph : Pass<"hw-print-module-graph", "mlir::ModuleOp"> {
   ];
 }
 
+def ExtractHierarchySlice : Pass<"hw-extract-hierarchy-slice",
+                                 "mlir::ModuleOp"> {
+  let summary = "Extract a depth-bounded HW hierarchy and externalize its frontier";
+  let description = [{
+    Starting at a named top-level hw.module, retain the reachable module
+    definitions up to a requested hierarchy depth.  Modules at the frontier
+    are replaced by hw.module.extern declarations with identical ports.  This
+    deliberately prevents combinational, sequential, memory, and aggregate
+    logic below the frontier from entering later conversion pipelines.
+
+    The pass can emit a JSON manifest containing the retained modules,
+    frontier modules, removed modules, instance edges, and port contracts.
+    The manifest is intended for structural comparison with UHDM and with a
+    hierarchy extracted from emitted SystemC.
+  }];
+  let options = [
+    Option<"topName", "top", "std::string", "\"\"",
+      "Name of the root hw.module">,
+    Option<"maxDepth", "max-depth", "unsigned", "0",
+      "Maximum module-definition depth to retain (top is depth zero)">,
+    Option<"manifestFilename", "manifest", "std::string", "\"\"",
+      "Optional JSON manifest output path">,
+  ];
+}
+
 def IMDeadCodeElim : Pass<"hw-imdce", "mlir::ModuleOp"> {
   let summary = "Intermodule dead code elimination";
   let description = [{

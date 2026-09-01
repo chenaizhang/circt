@@ -85,10 +85,17 @@ static StringAttr getCxxIdentifier(StringAttr name, Builder &builder) {
 static LogicalResult lowerStructureOnly(ModuleOp module,
                                         TypeConverter &typeConverter) {
   SmallVector<HWModuleOp> hwModules;
+  SmallVector<HWModuleExternOp> hwExternModules;
   module.walk([&](HWModuleOp hwModule) { hwModules.push_back(hwModule); });
+  module.walk([&](HWModuleExternOp hwModule) {
+    hwExternModules.push_back(hwModule);
+  });
   OpBuilder builder(module.getContext());
   llvm::StringMap<SmallVector<systemc::ModuleType::PortInfo>> modulePortInfo;
-  for (HWModuleOp hwModule : hwModules) {
+  SmallVector<HWModuleLike> allModules;
+  llvm::append_range(allModules, hwModules);
+  llvm::append_range(allModules, hwExternModules);
+  for (HWModuleLike hwModule : allModules) {
     auto &info = modulePortInfo[hwModule.getName()];
     for (const auto &port : hwModule.getPortList()) {
       Type wrappedType;
@@ -104,6 +111,44 @@ static LogicalResult lowerStructureOnly(ModuleOp module,
       portInfo.name = port.name;
       info.push_back(portInfo);
     }
+  }
+
+  // A hierarchy slice represents its frontier as hw.module.extern.  Materialize
+  // those declarations as compileable SystemC behavior slots instead of
+  // leaving unresolved C++ module types.  No behavior below the frontier is
+  // inspected or inferred here.
+  for (HWModuleExternOp hwModule : hwExternModules) {
+    if (!hwModule.getParameters().empty())
+      return hwModule.emitError("module parameters not supported yet");
+    auto ports = hwModule.getPortList();
+    if (llvm::any_of(ports, [](auto &port) { return port.isInOut(); }))
+      return hwModule.emitError("inout arguments not supported yet");
+    for (auto &port : ports) {
+      port.type = typeConverter.convertType(port.type);
+      if (!port.type)
+        return hwModule.emitError("failed to convert a flattened port type");
+    }
+
+    builder.setInsertionPoint(hwModule);
+    auto scModule = SCModuleOp::create(builder, hwModule.getLoc(),
+                                       hwModule.getNameAttr(), ports);
+    scModule.setVisibility(hwModule.getVisibility());
+    if (hwModule->hasAttr("hw.hierarchy.frontier")) {
+      scModule->setAttr("systemc.hierarchy.frontier", builder.getUnitAttr());
+      if (auto depth = hwModule->getAttr("hw.hierarchy.depth"))
+        scModule->setAttr("systemc.hierarchy.depth", depth);
+    }
+    auto portAttrs = hwModule.getAllPortAttrs();
+    if (!portAttrs.empty())
+      scModule.setAllArgAttrs(portAttrs);
+
+    builder.setInsertionPointToStart(scModule.getBodyBlock());
+    auto behaviorSlot = SCFuncOp::create(
+        builder, hwModule.getLoc(), builder.getStringAttr("behaviorSlot"));
+    auto ctor = scModule.getOrCreateCtor(builder);
+    builder.setInsertionPointToStart(ctor.getBodyBlock());
+    MethodOp::create(builder, hwModule.getLoc(), behaviorSlot.getHandle());
+    hwModule.erase();
   }
 
   for (HWModuleOp hwModule : hwModules) {
@@ -1107,7 +1152,7 @@ void HWToSystemCPass::runOnOperation() {
     // same preparation passes explicitly.
     mlir::OpPassManager preparePM("builtin.module");
     preparePM.addPass(
-        hw::createFlattenIO(hw::FlattenIOOptions{true, true, false, '_'}));
+        hw::createFlattenIO(hw::FlattenIOOptions{true, true, true, '_'}));
     if (!structureOnly) {
       auto &modulePM = preparePM.nestAny();
       modulePM.addPass(hw::createHWAggregateToComb());
