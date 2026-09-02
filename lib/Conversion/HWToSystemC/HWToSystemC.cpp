@@ -283,6 +283,17 @@ static LogicalResult lowerStructureOnly(ModuleOp module,
   for (SCModuleOp scModule : orderedModules)
     scModule->moveBefore(module.getBody(), module.getBody()->end());
 
+  // Structure-only output is a self-contained SystemC hierarchy contract.
+  // Frontends may place package functions, LLHD coroutines, and other
+  // behavioral helper symbols next to hw.module definitions.  No converted
+  // module body refers to those helpers, since structure-only deliberately
+  // emits empty process shells.  Remove them here so they cannot leak
+  // unsupported dialects into ExportSystemC or make a later textual reparse
+  // depend on unrelated behavior dialect registration.
+  for (Operation &op : llvm::make_early_inc_range(*module.getBody()))
+    if (!isa<SCModuleOp, emitc::IncludeOp>(op))
+      op.erase();
+
   builder.setInsertionPointToStart(module.getBody());
   emitc::IncludeOp::create(builder, module.getLoc(), "systemc.h", true);
   return success();

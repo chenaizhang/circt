@@ -21,15 +21,13 @@
 
 // SYSTEMC-LABEL: systemc.module private @Mid
 // SYSTEMC-SAME: systemc.hierarchy.frontier
-// SYSTEMC: %behaviorSlot = systemc.func
 // SYSTEMC: systemc.method %behaviorSlot
+// SYSTEMC: %behaviorSlot = systemc.func
 // SYSTEMC-LABEL: systemc.module @Top
-// SYSTEMC: systemc.instance.decl {{.*}} @Mid
+// SYSTEMC: systemc.instance.decl @Mid
 // SYSTEMC-NOT: @Leaf
+// SYSTEMC-NOT: func.func
 
-// MANIFEST: "schema": "circt.hw.hierarchy-slice.v1"
-// MANIFEST: "top": "Top"
-// MANIFEST: "max_depth": 1
 // MANIFEST: "frontier_modules": [
 // MANIFEST-NEXT: "Mid"
 // MANIFEST: "parent": "Top"
@@ -38,6 +36,9 @@
 // MANIFEST: "parent": "Mid"
 // MANIFEST: "retained": false
 // MANIFEST: "target": "Leaf"
+// MANIFEST: "max_depth": 1
+// MANIFEST: "schema": "circt.hw.hierarchy-slice.v1"
+// MANIFEST: "top": "Top"
 
 hw.module @Top(in %a: i8, out y: i8) {
   %y = hw.instance "mid" @Mid(a: %a: i8) -> (y: i8)
@@ -53,4 +54,8 @@ hw.module private @Leaf(in %a: i8, out y: i8) {
   %one = hw.constant 1 : i8
   %y = comb.add %a, %one : i8
   hw.output %y : i8
+}
+
+func.func private @package_helper() {
+  return
 }
