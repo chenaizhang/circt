@@ -189,21 +189,21 @@ struct ExtractHierarchySlicePass
           {"parent", edge.parent},
           {"instance", edge.instance},
           {"target", edge.target},
-          {"parent_depth", edge.parentDepth},
+          {"parent_depth", static_cast<int64_t>(edge.parentDepth)},
           {"retained", edge.retained}});
     for (const auto &name : retained) {
       auto module = modules.lookup(name);
       moduleJSON.push_back(llvm::json::Object{
           {"name", name},
-          {"depth", depth.lookup(name)},
+          {"depth", static_cast<int64_t>(depth.lookup(name))},
           {"frontier", depth.lookup(name) == maxDepth},
           {"ports", getPortContract(module)}});
     }
 
     llvm::json::Object manifest{
         {"schema", "circt.hw.hierarchy-slice.v1"},
-        {"top", topName},
-        {"max_depth", maxDepth},
+        {"top", topName.getValue()},
+        {"max_depth", static_cast<int64_t>(maxDepth.getValue())},
         {"retained_modules", std::move(retainedJSON)},
         {"frontier_modules", std::move(frontierJSON)},
         {"removed_modules", std::move(removedJSON)},

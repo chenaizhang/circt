@@ -50,6 +50,9 @@ jobs:
       - name: Build
         run: |
           cmake --build build \
+            --target obj.CIRCTHWTransforms \
+            --parallel 4
+          cmake --build build \
             --target circt-opt circt-translate circt-verilog FileCheck count not \
             --parallel 4
 
