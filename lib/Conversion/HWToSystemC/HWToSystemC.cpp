@@ -679,6 +679,53 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
   }
 };
 
+/// Convert hierarchy-slice frontier declarations into compileable SystemC
+/// behavior slots. Ordinary external modules remain external so existing
+/// interop flows keep their explicit ownership semantics.
+struct ConvertFrontierExtern
+    : public OpConversionPattern<HWModuleExternOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(HWModuleExternOp module, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!module->hasAttr("hw.hierarchy.frontier"))
+      return rewriter.notifyMatchFailure(module,
+                                         "not a hierarchy frontier module");
+    if (!module.getParameters().empty())
+      return module.emitError("module parameters not supported yet");
+
+    auto ports = module.getPortList();
+    if (llvm::any_of(ports, [](auto &port) { return port.isInOut(); }))
+      return module.emitError("inout arguments not supported yet");
+    for (auto &port : ports) {
+      port.type = typeConverter->convertType(port.type);
+      if (!port.type)
+        return module.emitError("failed to convert a flattened port type");
+    }
+
+    auto scModule = SCModuleOp::create(rewriter, module.getLoc(),
+                                       module.getNameAttr(), ports);
+    scModule.setVisibility(module.getVisibility());
+    scModule->setAttr("systemc.hierarchy.frontier",
+                      rewriter.getUnitAttr());
+    if (auto depth = module->getAttr("hw.hierarchy.depth"))
+      scModule->setAttr("systemc.hierarchy.depth", depth);
+    auto portAttrs = module.getAllPortAttrs();
+    if (!portAttrs.empty())
+      scModule.setAllArgAttrs(portAttrs);
+
+    rewriter.setInsertionPointToStart(scModule.getBodyBlock());
+    auto behaviorSlot = SCFuncOp::create(
+        rewriter, module.getLoc(), rewriter.getStringAttr("behaviorSlot"));
+    auto ctor = scModule.getOrCreateCtor(rewriter);
+    rewriter.setInsertionPointToStart(ctor.getBodyBlock());
+    MethodOp::create(rewriter, module.getLoc(), behaviorSlot.getHandle());
+    rewriter.eraseOp(module);
+    return success();
+  }
+};
+
 /// Convert hw.instance operations to systemc.instance.decl and a
 /// systemc.instance.bind_port operation for each port in the constructor. Also
 /// insert the necessary intermediate signals and write or read their state in
@@ -879,6 +926,8 @@ static StringAttr getUniqueStateName(SCModuleOp module, StringRef requested,
     names.insert(cast<StringAttr>(attr).getValue());
   for (auto nameDecl : module.getBodyBlock()->getOps<SignalOp>())
     names.insert(nameDecl.getName());
+  for (auto nameDecl : module.getBodyBlock()->getOps<MemoryOp>())
+    names.insert(nameDecl.getName());
 
   std::string base = requested.empty() ? "state" : requested.str();
   base += "_state";
@@ -887,6 +936,203 @@ static StringAttr getUniqueStateName(SCModuleOp module, StringRef requested,
     candidate = base + "_" + std::to_string(suffix);
   return builder.getStringAttr(candidate);
 }
+
+static Type getMemoryStorageType(seq::FirMemType type) {
+  unsigned width = type.getWidth();
+  std::string elementType;
+  if (width == 1)
+    elementType = "bool";
+  else if (width <= 64)
+    elementType = "sc_uint<" + std::to_string(width) + ">";
+  else if (width <= 512)
+    elementType = "sc_biguint<" + std::to_string(width) + ">";
+  else
+    elementType = "sc_bv<" + std::to_string(width) + ">";
+  return emitc::OpaqueType::get(
+      type.getContext(), "std::array<" + elementType + ", " +
+                             std::to_string(type.getDepth()) + ">");
+}
+
+static MemoryOp createMemory(ConversionPatternRewriter &rewriter,
+                             seq::FirMemOp memory, StringAttr name) {
+  OperationState state(memory.getLoc(), MemoryOp::getOperationName());
+  state.addTypes(getMemoryStorageType(memory.getType()));
+  state.addAttribute("name", name);
+  state.addAttribute("depth",
+                     rewriter.getI64IntegerAttr(memory.getType().getDepth()));
+  state.addAttribute("width",
+                     rewriter.getI64IntegerAttr(memory.getType().getWidth()));
+  state.addAttribute("readLatency", memory.getReadLatencyAttr());
+  state.addAttribute("writeLatency", memory.getWriteLatencyAttr());
+  return cast<MemoryOp>(rewriter.create(state));
+}
+
+static MemoryReadOp createMemoryRead(ConversionPatternRewriter &rewriter,
+                                     Location loc, Value memory,
+                                     Value address, Type dataType) {
+  OperationState state(loc, MemoryReadOp::getOperationName());
+  state.addOperands({memory, address});
+  state.addTypes(dataType);
+  return cast<MemoryReadOp>(rewriter.create(state));
+}
+
+static MemoryWriteOp createMemoryWrite(ConversionPatternRewriter &rewriter,
+                                       Location loc, Value memory,
+                                       Value address, Value data,
+                                       Value condition) {
+  OperationState state(loc, MemoryWriteOp::getOperationName());
+  state.addOperands({memory, address, data, condition});
+  return cast<MemoryWriteOp>(rewriter.create(state));
+}
+
+/// Lower a FIRRTL-style memory allocation into a fixed-size C++ array owned by
+/// the generated SC_MODULE. This first implementation deliberately supports
+/// the cycle-level forms that map directly to a simulation array: asynchronous
+/// or one-cycle reads and one-cycle writes.
+struct ConvertFirMem : public OpConversionPattern<seq::FirMemOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(seq::FirMemOp memory, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (memory.getWriteLatency() != 1)
+      return rewriter.notifyMatchFailure(memory,
+                                         "only write latency 1 is supported");
+    if (memory.getReadLatency() < 0 || memory.getReadLatency() > 1)
+      return rewriter.notifyMatchFailure(memory,
+                                         "only read latency 0 or 1 is supported");
+    if (memory.getInit())
+      return rewriter.notifyMatchFailure(
+          memory, "file/random memory initialization is not supported");
+    if (memory.getType().getMaskWidth().value_or(1) != 1)
+      return rewriter.notifyMatchFailure(
+          memory, "only whole-word or one-bit write enables are supported");
+
+    auto scModule = memory->getParentOfType<SCModuleOp>();
+    auto scFunc = memory->getParentOfType<SCFuncOp>();
+    if (!scModule || !scFunc)
+      return rewriter.notifyMatchFailure(
+          memory, "memory must be located in a converted SystemC module");
+
+    StringAttr name = getUniqueStateName(
+        scModule, memory.getName().value_or("memory"), rewriter);
+    rewriter.setInsertionPoint(scFunc);
+    auto storage = createMemory(rewriter, memory, name);
+    rewriter.replaceOp(memory, storage.getMemory());
+    return success();
+  }
+};
+
+/// Lower an asynchronous or one-cycle FIRRTL memory read port.
+struct ConvertFirMemRead : public OpConversionPattern<seq::FirMemReadOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(seq::FirMemReadOp read, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto memory = adaptor.getMemory().template getDefiningOp<MemoryOp>();
+    if (!memory)
+      return rewriter.notifyMatchFailure(read,
+                                         "memory allocation is not converted");
+    int32_t latency = memory.getReadLatency();
+    if (latency == 0) {
+      if (read.getEnable())
+        return rewriter.notifyMatchFailure(
+            read, "enabled asynchronous reads are not supported");
+      auto value = createMemoryRead(rewriter, read.getLoc(),
+                                    adaptor.getMemory(), adaptor.getAddress(),
+                                    read.getType());
+      rewriter.replaceOp(read, value.getData());
+      return success();
+    }
+    if (latency != 1)
+      return rewriter.notifyMatchFailure(read,
+                                         "only read latency 0 or 1 is supported");
+
+    auto scModule = read->getParentOfType<SCModuleOp>();
+    auto scFunc = read->getParentOfType<SCFuncOp>();
+    if (!scModule || !scFunc)
+      return rewriter.notifyMatchFailure(
+          read, "read port must be in a converted SystemC module");
+    Value clockChannel = findClockChannel(adaptor.getClk());
+    if (!clockChannel)
+      return rewriter.notifyMatchFailure(
+          read, "clock is not read directly from a SystemC channel");
+
+    Type stateType = getTypeConverter()->convertType(read.getType());
+    std::string requestedStateName = memory.getName().str() + "_read";
+    StringAttr stateName =
+        getUniqueStateName(scModule, requestedStateName, rewriter);
+    auto ctor = scModule.getOrCreateCtor(rewriter);
+    rewriter.setInsertionPoint(ctor);
+    Value state = SignalOp::create(rewriter, read.getLoc(),
+                                   SignalType::get(stateType), stateName)
+                      .getSignal();
+
+    for (auto sensitivity : ctor.getBodyBlock()->getOps<SensitiveOp>()) {
+      sensitivity.getSensitivitiesMutable().append(state);
+      break;
+    }
+
+    rewriter.setInsertionPointToStart(scFunc.getBodyBlock());
+    Value stateRead = SignalReadOp::create(rewriter, read.getLoc(), state);
+    Value current = getTypeConverter()->materializeSourceConversion(
+        rewriter, read.getLoc(), read.getType(), stateRead);
+
+    rewriter.setInsertionPoint(read);
+    Value arrayValue = createMemoryRead(rewriter, read.getLoc(),
+                                        adaptor.getMemory(), adaptor.getAddress(),
+                                        read.getType());
+    Value condition = SignalPosedgeOp::create(rewriter, read.getLoc(),
+                                              clockChannel);
+    if (adaptor.getEnable())
+      condition = comb::AndOp::create(rewriter, read.getLoc(), condition,
+                                      adaptor.getEnable());
+    Value next =
+        comb::MuxOp::create(rewriter, read.getLoc(), condition, arrayValue,
+                            current);
+    Value converted = getTypeConverter()->materializeTargetConversion(
+        rewriter, read.getLoc(), stateType, next);
+    SignalWriteOp::create(rewriter, read.getLoc(), state, converted);
+    rewriter.replaceOp(read, current);
+    return success();
+  }
+};
+
+/// Lower a one-cycle FIRRTL memory write into an edge/enable guarded C++ array
+/// assignment in the module update method.
+struct ConvertFirMemWrite : public OpConversionPattern<seq::FirMemWriteOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(seq::FirMemWriteOp write, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto memory = adaptor.getMemory().template getDefiningOp<MemoryOp>();
+    if (!memory)
+      return rewriter.notifyMatchFailure(write,
+                                         "memory allocation is not converted");
+    if (memory.getWriteLatency() != 1)
+      return rewriter.notifyMatchFailure(write,
+                                         "only write latency 1 is supported");
+    Value clockChannel = findClockChannel(adaptor.getClk());
+    if (!clockChannel)
+      return rewriter.notifyMatchFailure(
+          write, "clock is not read directly from a SystemC channel");
+
+    Value condition = SignalPosedgeOp::create(rewriter, write.getLoc(),
+                                              clockChannel);
+    if (adaptor.getEnable())
+      condition = comb::AndOp::create(rewriter, write.getLoc(), condition,
+                                      adaptor.getEnable());
+    if (adaptor.getMask())
+      condition = comb::AndOp::create(rewriter, write.getLoc(), condition,
+                                      adaptor.getMask());
+    createMemoryWrite(rewriter, write.getLoc(), adaptor.getMemory(),
+                      adaptor.getAddress(), adaptor.getData(), condition);
+    rewriter.eraseOp(write);
+    return success();
+  }
+};
 
 /// Lower a Seq register into a SystemC signal updated from the module's
 /// existing SC_METHOD. The method is sensitive to the state signal as well as
@@ -1066,15 +1312,19 @@ static void populateLegality(ConversionTarget &target) {
   target.addLegalOp<hw::ConstantOp>();
   // Extern leaves are retained as Verilator/SystemC black boxes. They are
   // referenced by systemc.interop.verilated after instance wrapping.
-  target.addLegalOp<hw::HWModuleExternOp>();
+  target.addDynamicallyLegalOp<hw::HWModuleExternOp>([](auto module) {
+    return !module->hasAttr("hw.hierarchy.frontier");
+  });
 }
 
 static void populateOpConversion(RewritePatternSet &patterns,
                                  TypeConverter &typeConverter) {
   patterns
-      .add<ConvertHWModule, ConvertInstance, ConvertClockCast<seq::ToClockOp>,
+      .add<ConvertHWModule, ConvertFrontierExtern, ConvertInstance,
+           ConvertClockCast<seq::ToClockOp>,
            ConvertClockCast<seq::FromClockOp>, ConvertCompReg<seq::CompRegOp>,
-           ConvertCompReg<seq::CompRegClockEnabledOp>, ConvertFirReg>(
+           ConvertCompReg<seq::CompRegClockEnabledOp>, ConvertFirReg,
+           ConvertFirMem, ConvertFirMemRead, ConvertFirMemWrite>(
           typeConverter, patterns.getContext());
 }
 
@@ -1116,6 +1366,8 @@ static void populateTypeConversion(TypeConverter &converter) {
   converter.addConversion([](seq::ClockType type) -> Type {
     return IntegerType::get(type.getContext(), 1);
   });
+  converter.addConversion(
+      [](seq::FirMemType type) -> Type { return getMemoryStorageType(type); });
 
   converter.addSourceMaterialization(
       [](OpBuilder &builder, Type type, ValueRange values, Location loc) {
@@ -1207,6 +1459,7 @@ void HWToSystemCPass::runOnOperation() {
   // the top instead of one per module.
   OpBuilder builder(module.getRegion());
   emitc::IncludeOp::create(builder, module->getLoc(), "systemc.h", true);
+  emitc::IncludeOp::create(builder, module->getLoc(), "array", true);
 
   ConversionTarget target(context);
   TypeConverter typeConverter;

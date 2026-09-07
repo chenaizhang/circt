@@ -268,6 +268,15 @@ struct ThreadEmitter : OpEmissionPattern<ThreadOp> {
   }
 };
 
+/// Emit a fixed-duration wait inside an SC_THREAD.
+struct WaitTimeEmitter : OpEmissionPattern<WaitTimeOp> {
+  using OpEmissionPattern::OpEmissionPattern;
+
+  void emitStatement(WaitTimeOp op, EmissionPrinter &p) override {
+    p << "wait(sc_time(" << op.getFemtoseconds() << ", SC_FS));\n";
+  }
+};
+
 /// Emit a systemc.cpp.delete operation.
 struct DeleteEmitter : OpEmissionPattern<DeleteOp> {
   using OpEmissionPattern::OpEmissionPattern;
@@ -306,6 +315,62 @@ struct SignalEmitter : OpEmissionPattern<SignalOp> {
     }
 
     p << op.getName() << ";\n";
+  }
+};
+
+/// Emit a fixed-depth simulation memory as a value-initialized C++ member.
+struct MemoryEmitter : OpEmissionPattern<MemoryOp> {
+  using OpEmissionPattern::OpEmissionPattern;
+
+  MatchResult matchInlinable(Value value) override {
+    if (value.getDefiningOp<MemoryOp>())
+      return Precedence::VAR;
+    return {};
+  }
+
+  void emitInlined(Value value, EmissionPrinter &p) override {
+    p << value.getDefiningOp<MemoryOp>().getName();
+  }
+
+  void emitStatement(MemoryOp op, EmissionPrinter &p) override {
+    p.emitType(op.getMemory().getType());
+    p << " " << op.getName() << "{};\n";
+  }
+};
+
+/// Emit an array element read as an inline C++ expression.
+struct MemoryReadEmitter : OpEmissionPattern<MemoryReadOp> {
+  using OpEmissionPattern::OpEmissionPattern;
+
+  MatchResult matchInlinable(Value value) override {
+    if (value.getDefiningOp<MemoryReadOp>())
+      return Precedence::MEMBER_ACCESS;
+    return {};
+  }
+
+  void emitInlined(Value value, EmissionPrinter &p) override {
+    auto op = value.getDefiningOp<MemoryReadOp>();
+    p.getInlinable(op.getMemory()).emit();
+    p << "[";
+    p.getInlinable(op.getAddress()).emit();
+    p << "]";
+  }
+};
+
+/// Emit a clock/enable guarded array element write.
+struct MemoryWriteEmitter : OpEmissionPattern<MemoryWriteOp> {
+  using OpEmissionPattern::OpEmissionPattern;
+
+  void emitStatement(MemoryWriteOp op, EmissionPrinter &p) override {
+    p << "if (";
+    p.getInlinable(op.getCondition()).emit();
+    p << ") ";
+    p.getInlinable(op.getMemory()).emit();
+    p << "[";
+    p.getInlinable(op.getAddress()).emit();
+    p << "] = ";
+    p.getInlinable(op.getData()).emit();
+    p << ";\n";
   }
 };
 
@@ -666,10 +731,11 @@ struct DynIntegerTypeEmitter : public TypeEmissionPattern<Ty> {
 void circt::ExportSystemC::populateSystemCOpEmitters(
     OpEmissionPatternSet &patterns, MLIRContext *context) {
   patterns.add<SCModuleEmitter, CtorEmitter, SCFuncEmitter, MethodEmitter,
-               ThreadEmitter, ConvertEmitter,
+               ThreadEmitter, WaitTimeEmitter, ConvertEmitter,
                // Signal and port related emitters
                SignalWriteEmitter, SignalReadEmitter, SignalPosedgeEmitter,
-               SignalEmitter, SensitiveEmitter,
+               SignalEmitter, SensitiveEmitter, MemoryEmitter,
+               MemoryReadEmitter, MemoryWriteEmitter,
                // Instance-related emitters
                InstanceDeclEmitter, BindPortEmitter,
                // CPP-level operation emitters

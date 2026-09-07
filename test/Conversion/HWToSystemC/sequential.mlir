@@ -22,6 +22,28 @@ hw.module @counter(in %clk: i1, in %reset: i1, in %enable: i1,
 
 // -----
 
+// A simulation memory maps to a fixed-size C++ array. The asynchronous read
+// remains combinational and the write is guarded by the clock edge and enable.
+hw.module @memory(in %clk: i1, in %writeEnable: i1, in %address: i4,
+                  in %writeData: i8, out readData: i8) {
+  %clock = seq.to_clock %clk
+  %storage = seq.firmem 0, 1, undefined, undefined : <16 x 8>
+  %readData = seq.firmem.read_port %storage[%address], clock %clock : <16 x 8>
+  seq.firmem.write_port %storage[%address] = %writeData, clock %clock
+      enable %writeEnable : <16 x 8>
+  hw.output %readData : i8
+}
+
+// CHECK-LABEL: systemc.module @memory
+// CHECK: systemc.memory {{.*}}[16 x 8] latency 0, 1
+// CHECK: systemc.memory.read
+// CHECK: systemc.signal.posedge %clk
+// CHECK: comb.and
+// CHECK: systemc.memory.write
+// CHECK-NOT: seq.
+
+// -----
+
 hw.module @async_register(in %clk: i1, in %reset: i1, in %next: i8,
                           out value: i8) {
   %clock = seq.to_clock %clk

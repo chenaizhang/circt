@@ -59,6 +59,51 @@ def SignalOp : SystemCOp<"signal", [HasCustomSSAName,
   }];
 }
 
+def MemoryOp : SystemCOp<"memory", [
+    SystemCNameDeclOpInterface,
+    HasParent<"SCModuleOp">
+]> {
+  let summary = "Declares a fixed-depth SystemC simulation memory.";
+  let description = [{
+    Represents storage owned by an `SC_MODULE`. The result type describes the
+    concrete C++ container type (normally `std::array<sc_uint<W>, D>`), while
+    the depth and width attributes retain the hardware shape for diagnostics
+    and downstream transforms.
+  }];
+
+  let arguments = (ins StrAttr:$name, I64Attr:$depth, I64Attr:$width,
+                       I32Attr:$readLatency, I32Attr:$writeLatency);
+  let results = (outs AnyType:$memory);
+  let assemblyFormat = [{
+    $name `[` $depth `x` $width `]`
+    `latency` $readLatency `,` $writeLatency attr-dict `:` type($memory)
+  }];
+}
+
+def MemoryReadOp : SystemCOp<"memory.read", []> {
+  let summary = "Reads one element from a SystemC simulation memory.";
+  let arguments = (ins AnyType:$memory, AnySignlessInteger:$address);
+  let results = (outs AnySignlessInteger:$data);
+  let assemblyFormat = [{
+    $memory `[` $address `]` attr-dict `:` type($memory) `,` type($address)
+      `->` type($data)
+  }];
+}
+
+def MemoryWriteOp : SystemCOp<"memory.write", []> {
+  let summary = "Conditionally writes one SystemC simulation memory element.";
+  let description = [{
+    The write is performed when `condition` is true. HW-to-SystemC combines
+    the source clock edge, enable, and supported write mask into this value.
+  }];
+  let arguments = (ins AnyType:$memory, AnySignlessInteger:$address,
+                       AnySignlessInteger:$data, I1:$condition);
+  let assemblyFormat = [{
+    $memory `[` $address `]` `=` $data `if` $condition attr-dict `:`
+      type($memory) `,` type($address) `,` type($data)
+  }];
+}
+
 def MethodOp : SystemCOp<"method", []> {
   let summary = "Represents the SystemC SC_METHOD macro.";
   let description = [{
@@ -77,6 +122,17 @@ def ThreadOp : SystemCOp<"thread", []> {
 
   let arguments = (ins NullaryVoidFunctionType:$funcHandle);
   let assemblyFormat = "$funcHandle attr-dict";
+}
+
+def WaitTimeOp : SystemCOp<"wait_time", []> {
+  let summary = "Suspends the current SC_THREAD for a fixed duration.";
+  let description = [{
+    Represents `wait(sc_time(N, SC_FS))` inside an `SC_THREAD`. Delayed
+    non-synthesizable SystemVerilog processes can use this operation after
+    their control flow has been outlined into a SystemC thread.
+  }];
+  let arguments = (ins I64Attr:$femtoseconds);
+  let assemblyFormat = "$femtoseconds attr-dict";
 }
 
 def SensitiveOp : SystemCOp<"sensitive", [HasParent<"CtorOp">]> {

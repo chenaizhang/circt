@@ -79,6 +79,19 @@ systemc.module @namedSignal() {
   %sigName = systemc.signal named : !systemc.signal<i1>
 }
 
+// CHECK-LABEL: SC_MODULE(delayedProcess)
+// CHECK: SC_THREAD(run);
+// CHECK: void run() {
+// CHECK: wait(sc_time(10000000, SC_FS));
+systemc.module @delayedProcess() {
+  systemc.ctor {
+    systemc.thread %run
+  }
+  %run = systemc.func {
+    systemc.wait_time 10000000
+  }
+}
+
 // CHECK-LABEL: SC_MODULE(nativeCTypes)
 // CHECK-NEXT: sc_in<bool> port0;
 // CHECK-NEXT: sc_in<uint8_t> port1;
