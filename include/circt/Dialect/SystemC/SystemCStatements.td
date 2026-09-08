@@ -100,7 +100,7 @@ def MemoryWriteOp : SystemCOp<"memory.write", []> {
                        AnyType:$data, AnyType:$condition);
   let assemblyFormat = [{
     $memory `[` $address `]` `=` $data `if` $condition attr-dict `:`
-      type($memory) `,` type($address) `,` type($data)
+      type($memory) `,` type($address) `,` type($data) `,` type($condition)
   }];
 }
 

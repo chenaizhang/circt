@@ -46,7 +46,7 @@ systemc.module @memory(%clk: !systemc.in<i1>,
     %dataValue = systemc.signal.read %writeData : !systemc.in<!systemc.uint<8>>
     %addressInt = systemc.convert %addressValue : (!systemc.uint<4>) -> i4
     %dataInt = systemc.convert %dataValue : (!systemc.uint<8>) -> i8
-    systemc.memory.write %storage[%addressInt] = %dataInt if %condition : !emitc.opaque<"std::array<sc_uint<8>, 16>">, i4, i8
+    systemc.memory.write %storage[%addressInt] = %dataInt if %condition : !emitc.opaque<"std::array<sc_uint<8>, 16>">, i4, i8, i1
     %value = systemc.memory.read %storage[%addressInt] : !emitc.opaque<"std::array<sc_uint<8>, 16>">, i4 -> i8
     %output = systemc.convert %value : (i8) -> !systemc.uint<8>
     systemc.signal.write %readData, %output : !systemc.out<!systemc.uint<8>>
