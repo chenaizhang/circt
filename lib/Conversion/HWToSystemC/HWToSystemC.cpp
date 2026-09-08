@@ -934,7 +934,9 @@ public:
           conversion = soleUser;
           soleUser = *soleUser->getResult(0).user_begin();
         }
-        if (auto writeOp = dyn_cast<SignalWriteOp>(soleUser)) {
+        if (auto writeOp = dyn_cast<SignalWriteOp>(soleUser);
+            writeOp &&
+            (!conversion || isa<SignalType>(writeOp.getDest().getType()))) {
           // Use the channel written to directly. When there are multiple
           // channels this value is written to or it is used somewhere else, we
           // cannot shortcut it and have to insert an intermediate value because
