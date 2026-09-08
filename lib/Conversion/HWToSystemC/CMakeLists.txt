@@ -13,7 +13,6 @@ add_circt_conversion_library(CIRCTHWToSystemC
   CIRCTHWTransforms
   CIRCTComb
   CIRCTSeq
-  CIRCTSeqTransforms
   MLIREmitCDialect
   MLIRTransforms
 )
