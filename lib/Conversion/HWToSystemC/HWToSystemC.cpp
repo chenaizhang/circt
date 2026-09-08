@@ -1346,8 +1346,7 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
     next = comb::MuxOp::create(rewriter, loc, posedge, next, current);
     Value converted = next;
     if (converted.getType() != stateType)
-      converted = this->getTypeConverter()->materializeTargetConversion(
-          rewriter, loc, stateType, converted);
+      converted = ConvertOp::create(rewriter, loc, stateType, converted);
     if (!converted)
       return rewriter.notifyMatchFailure(reg,
                                          "failed to write converted state");

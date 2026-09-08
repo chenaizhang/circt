@@ -62,6 +62,25 @@ hw.module @async_register(in %clk: i1, in %reset: i1, in %next: i8,
 
 // -----
 
+// A constant next-state producer may be legalized before its consumer. The
+// register conversion must use the adapted value without recursively invoking
+// the dialect converter's target materializer.
+hw.module @constant_register(in %clk: i1, out value: i8) {
+  %clock = seq.to_clock %clk
+  %zero = hw.constant 0 : i8
+  %value = seq.compreg %zero, %clock : i8
+  hw.output %value : i8
+}
+
+// CHECK-LABEL: systemc.module @constant_register
+// CHECK: %[[EDGE:.*]] = systemc.signal.posedge %clk : !systemc.in<i1>
+// CHECK: %[[NEXT:.*]] = comb.mux %[[EDGE]], %{{.*}}, %{{.*}} : i8
+// CHECK: %[[CONVERTED:.*]] = systemc.convert %[[NEXT]] : (i8) -> !systemc.uint<8>
+// CHECK: systemc.signal.write %{{.*}}, %[[CONVERTED]]
+// CHECK-NOT: seq.
+
+// -----
+
 // Exercise a graph-region feedback edge where the register input is defined
 // after the register. Lowering must replace the feedback with a current-state
 // signal read and leave the add in the combinational next-state cone.
