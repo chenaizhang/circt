@@ -1266,6 +1266,9 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
 
     Location loc = reg.getLoc();
     Type stateType = this->getTypeConverter()->convertType(reg.getType());
+    if (!stateType)
+      return rewriter.notifyMatchFailure(reg,
+                                         "unsupported sequential state type");
     auto signalType = SignalType::get(stateType);
     StringAttr preLoweredName =
         reg->template getAttrOfType<StringAttr>("systemc.prelowered_state");
@@ -1303,30 +1306,16 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
                                          "failed to read converted state");
 
     rewriter.setInsertionPointToEnd(scFunc.getBodyBlock());
-    // Use the conversion adaptor here. The original operands may already have
-    // been replaced while dialect conversion is rewriting the enclosing
-    // method; materializing a conversion from those stale values can crash
-    // instead of producing a legalization diagnostic.
-    Value next = adaptor.getInput();
-    if (next.getType() != reg.getType())
-      next = this->getTypeConverter()->materializeSourceConversion(
-          rewriter, loc, reg.getType(), next);
-    if (!next)
-      return rewriter.notifyMatchFailure(reg,
-                                         "failed to convert next-state value");
+    // Keep the next-state cone in the Core integer domain until the final
+    // state write. The adaptor may already contain SystemC integer values,
+    // which cannot be mixed with comb operations over signless integers.
+    Value next = reg.getInput();
     if constexpr (std::is_same_v<OpTy, seq::CompRegClockEnabledOp>)
-      next = comb::MuxOp::create(rewriter, loc, adaptor.getClockEnable(), next,
+      next = comb::MuxOp::create(rewriter, loc, reg.getClockEnable(), next,
                                  current);
     if (reg.getReset()) {
-      Value resetValue = adaptor.getResetValue();
-      if (resetValue.getType() != reg.getType())
-        resetValue = this->getTypeConverter()->materializeSourceConversion(
-            rewriter, loc, reg.getType(), resetValue);
-      if (!resetValue)
-        return rewriter.notifyMatchFailure(
-            reg, "failed to convert reset value");
-      next = comb::MuxOp::create(rewriter, loc, adaptor.getReset(), resetValue,
-                                 next);
+      next = comb::MuxOp::create(rewriter, loc, reg.getReset(),
+                                 reg.getResetValue(), next);
     }
 
     Value posedge = SignalPosedgeOp::create(rewriter, loc, clockChannel);
