@@ -670,21 +670,11 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     // is legal there but not legal for the SSACFG body of systemc.func.  The
     // register result replacements above cut the sequential SCCs; anything
     // left that cannot be sorted is therefore a genuine combinational cycle.
-    // Instance operations become SystemC module declarations and channel
-    // bindings. Their input/output SSA edges are therefore structural edges,
-    // not expressions that must be evaluated in the parent's SC_METHOD. Keep
-    // them out of the parent SSACFG topological ordering so legal hierarchy
-    // feedback (A.out -> B.in -> B.out -> A.in) is represented by signals.
-    auto isStructuralOperand = [](Value, Operation *user) {
-      // Native HW instances become declarations and port bindings, so their
-      // operands are structural. Verilator interop instances instead become
-      // executable update calls inside this SC_METHOD. Their inputs must
-      // participate in the ordering after preLowerInteropChannels has cut
-      // feedback through SystemC signals; otherwise derived glue expressions
-      // can remain after the update call and later lower to null operands.
-      return isa<hw::InstanceOp>(user);
-    };
-    if (!mlir::sortTopologically(scFunc.getBodyBlock(), isStructuralOperand)) {
+    // Backward native-instance edges and interop feedback have already been
+    // cut through SystemC channels.  Keep the remaining instance operands in
+    // the dependency graph: glue expressions feeding a child input must be
+    // evaluated before ConvertInstance emits the corresponding signal write.
+    if (!mlir::sortTopologically(scFunc.getBodyBlock())) {
       auto diagnostic = emitError(
           module->getLoc(),
           "cannot order HW body before SystemC conversion; unresolved "
