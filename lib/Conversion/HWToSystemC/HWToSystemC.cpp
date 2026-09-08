@@ -1307,15 +1307,39 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
 
     rewriter.setInsertionPointToEnd(scFunc.getBodyBlock());
     // Keep the next-state cone in the Core integer domain until the final
-    // state write. The adaptor may already contain SystemC integer values,
-    // which cannot be mixed with comb operations over signless integers.
-    Value next = reg.getInput();
+    // state write. The original producer may already have been rewritten, so
+    // start from the adaptor but look through its target materialization when
+    // possible. This avoids both stale operands and redundant round trips.
+    auto recoverCoreValue = [&](Value value, Type coreType) -> Value {
+      if (!value)
+        return {};
+      if (value.getType() == coreType)
+        return value;
+      if (auto convert = value.getDefiningOp<ConvertOp>();
+          convert && convert.getInput().getType() == coreType)
+        return convert.getInput();
+      if (auto cast = value.getDefiningOp<UnrealizedConversionCastOp>();
+          cast && cast->getNumOperands() == 1 &&
+          cast->getOperand(0).getType() == coreType)
+        return cast->getOperand(0);
+      return this->getTypeConverter()->materializeSourceConversion(
+          rewriter, loc, coreType, value);
+    };
+    Value next = recoverCoreValue(adaptor.getInput(), reg.getType());
+    if (!next)
+      return rewriter.notifyMatchFailure(reg,
+                                         "failed to recover next-state value");
     if constexpr (std::is_same_v<OpTy, seq::CompRegClockEnabledOp>)
-      next = comb::MuxOp::create(rewriter, loc, reg.getClockEnable(), next,
+      next = comb::MuxOp::create(rewriter, loc, adaptor.getClockEnable(), next,
                                  current);
     if (reg.getReset()) {
-      next = comb::MuxOp::create(rewriter, loc, reg.getReset(),
-                                 reg.getResetValue(), next);
+      Value resetValue =
+          recoverCoreValue(adaptor.getResetValue(), reg.getType());
+      if (!resetValue)
+        return rewriter.notifyMatchFailure(reg,
+                                           "failed to recover reset value");
+      next = comb::MuxOp::create(rewriter, loc, adaptor.getReset(), resetValue,
+                                 next);
     }
 
     Value posedge = SignalPosedgeOp::create(rewriter, loc, clockChannel);
