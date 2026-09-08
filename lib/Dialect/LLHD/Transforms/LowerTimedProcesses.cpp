@@ -693,10 +693,18 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
 
       // Create the register from the init and patch its next value after
       // the update mux tree is built.
-      seq::CompRegOp reg;
+      seq::FirRegOp reg;
       Value current = sig.getInit();
       if (clock) {
-        reg = builder.create<seq::CompRegOp>(loc, sig.getInit(), clock);
+        // Keep array state as a FIR register until the HW-to-SystemC
+        // preparation pipeline.  The seq-reg-of-vec-to-mem pass can then
+        // recognize indexed read/write patterns and preserve them as a
+        // simulation memory instead of scalarizing every array element into
+        // an independent SystemC signal.
+        reg = seq::FirRegOp::create(
+            builder, loc, sig.getInit(), clock, builder.getStringAttr(""),
+            hw::InnerSymAttr{}, /*preset=*/IntegerAttr{}, /*reset=*/Value{},
+            /*resetValue=*/Value{}, /*isAsync=*/false);
         current = reg;
       }
       SmallVector<Value> elems;
@@ -797,7 +805,7 @@ static LogicalResult lowerSignals(hw::HWModuleOp module,
           builder.create<hw::ArrayCreateOp>(loc, reversed).getResult();
       Value replacement = next;
       if (reg) {
-        reg.setOperand(0, next);
+        reg.getNextMutable().assign(next);
         replacement = reg;
       }
 

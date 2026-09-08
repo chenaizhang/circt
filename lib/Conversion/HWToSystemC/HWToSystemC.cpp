@@ -15,6 +15,7 @@
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWPasses.h"
 #include "circt/Dialect/Seq/SeqOps.h"
+#include "circt/Dialect/Seq/SeqPasses.h"
 #include "circt/Dialect/Sim/SimDialect.h"
 #include "circt/Dialect/SystemC/SystemCOps.h"
 #include "mlir/Analysis/TopologicalSortUtils.h"
@@ -1418,6 +1419,12 @@ void HWToSystemCPass::runOnOperation() {
         hw::createFlattenIO(hw::FlattenIOOptions{true, true, true, '_'}));
     if (!structureOnly) {
       auto &modulePM = preparePM.nestAny();
+      // Preserve register arrays that implement indexed storage as
+      // seq.firmem before aggregate lowering expands them into scalar
+      // registers.  This lets the SystemC conversion emit a fixed-size C++
+      // array with explicit indexed reads and clocked writes.
+      modulePM.addPass(createCanonicalizerPass());
+      modulePM.addPass(seq::createRegOfVecToMem());
       modulePM.addPass(hw::createHWAggregateToComb());
       preparePM.addPass(hw::createHWConvertBitcasts());
       // hw-convert-bitcasts may reintroduce aggregate ops, so lower them once
