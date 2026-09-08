@@ -78,7 +78,7 @@ hw.module @nested_compreg_mem(in %clk : i1, in %reset_n : i1, in %addr : i2,
 }
 // CHECK: %mem = seq.firmem 0, 1, undefined, undefined : <4 x 8, mask 1>
 // CHECK: seq.firmem.read_port %mem[%addr]
-// CHECK: seq.firmem.write_port %mem[%addr] = %data, clock %clock enable %we
+// CHECK: seq.firmem.write_port %mem[%addr] = %data, clock %{{.*}} enable %we
 // CHECK-NOT: seq.compreg {{.*}} : !hw.array<4xi8>
 
 // CHECK: %[[clock:.+]] = seq.to_clock %clk

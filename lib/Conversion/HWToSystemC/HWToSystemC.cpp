@@ -1298,6 +1298,9 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
     Value stateRead = SignalReadOp::create(rewriter, loc, state);
     Value current = this->getTypeConverter()->materializeSourceConversion(
         rewriter, loc, reg.getType(), stateRead);
+    if (!current)
+      return rewriter.notifyMatchFailure(reg,
+                                         "failed to read converted state");
 
     rewriter.setInsertionPointToEnd(scFunc.getBodyBlock());
     // Use the conversion adaptor here. The original operands may already have
@@ -1305,17 +1308,36 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
     // method; materializing a conversion from those stale values can crash
     // instead of producing a legalization diagnostic.
     Value next = adaptor.getInput();
+    if (next.getType() != reg.getType())
+      next = this->getTypeConverter()->materializeSourceConversion(
+          rewriter, loc, reg.getType(), next);
+    if (!next)
+      return rewriter.notifyMatchFailure(reg,
+                                         "failed to convert next-state value");
     if constexpr (std::is_same_v<OpTy, seq::CompRegClockEnabledOp>)
       next = comb::MuxOp::create(rewriter, loc, adaptor.getClockEnable(), next,
                                  current);
-    if (reg.getReset())
-      next = comb::MuxOp::create(rewriter, loc, adaptor.getReset(),
-                                 adaptor.getResetValue(), next);
+    if (reg.getReset()) {
+      Value resetValue = adaptor.getResetValue();
+      if (resetValue.getType() != reg.getType())
+        resetValue = this->getTypeConverter()->materializeSourceConversion(
+            rewriter, loc, reg.getType(), resetValue);
+      if (!resetValue)
+        return rewriter.notifyMatchFailure(
+            reg, "failed to convert reset value");
+      next = comb::MuxOp::create(rewriter, loc, adaptor.getReset(), resetValue,
+                                 next);
+    }
 
     Value posedge = SignalPosedgeOp::create(rewriter, loc, clockChannel);
     next = comb::MuxOp::create(rewriter, loc, posedge, next, current);
-    Value converted = this->getTypeConverter()->materializeTargetConversion(
-        rewriter, loc, stateType, next);
+    Value converted = next;
+    if (converted.getType() != stateType)
+      converted = this->getTypeConverter()->materializeTargetConversion(
+          rewriter, loc, stateType, converted);
+    if (!converted)
+      return rewriter.notifyMatchFailure(reg,
+                                         "failed to write converted state");
     SignalWriteOp::create(rewriter, loc, state, converted);
 
     rewriter.replaceOp(reg, current);
