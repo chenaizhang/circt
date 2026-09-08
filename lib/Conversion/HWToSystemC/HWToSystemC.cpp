@@ -799,24 +799,11 @@ class ConvertInstance : public OpConversionPattern<InstanceOp> {
   using OpConversionPattern::OpConversionPattern;
 
 private:
-  template <typename PortTy>
-  LogicalResult
-  collectPortInfo(ValueRange ports, ArrayAttr portNames,
-                  SmallVector<systemc::ModuleType::PortInfo> &portInfo) const {
-    for (auto inPort : llvm::zip(ports, portNames)) {
-      Type ty = std::get<0>(inPort).getType();
-      systemc::ModuleType::PortInfo info;
-
-      if (isa<hw::InOutType>(ty))
-        return failure();
-
-      info.type = typeConverter->convertType(PortTy::get(ty));
-      info.name = cast<StringAttr>(std::get<1>(inPort));
-      portInfo.push_back(info);
-    }
-
-    return success();
-  }
+  struct OrderedPort {
+    hw::ModulePort::Direction direction;
+    size_t valueIndex;
+    systemc::ModuleType::PortInfo info;
+  };
 
 public:
   LogicalResult
@@ -837,14 +824,48 @@ public:
     OpBuilder::InsertPoint initInsertPt(ctor.getBodyBlock(),
                                         ctor.getBodyBlock()->end());
 
-    // Collect the port types and names of the instantiated module and convert
-    // them to appropriate systemc types.
+    // Preserve the referenced module's port order. HW instances store operands
+    // and results separately, whereas a module may interleave input and output
+    // ports. Building the declaration as "all inputs, then all outputs" gives
+    // the wrong ABI for such modules after IO flattening.
     SmallVector<systemc::ModuleType::PortInfo> portInfo;
-    if (failed(collectPortInfo<InputType>(adaptor.getInputs(),
-                                          adaptor.getArgNames(), portInfo)) ||
-        failed(collectPortInfo<OutputType>(instanceOp->getResults(),
-                                           adaptor.getResultNames(), portInfo)))
-      return instanceOp->emitOpError("inout ports not supported");
+    SmallVector<OrderedPort> orderedPorts;
+    Operation *target = SymbolTable::lookupNearestSymbolFrom(
+        instanceOp, instanceOp.getModuleNameAttr());
+    if (!target)
+      return instanceOp->emitOpError("cannot find referenced module");
+
+    SmallVector<hw::PortInfo> targetPorts;
+    if (auto hwModule = dyn_cast<hw::HWModuleLike>(target))
+      targetPorts = hwModule.getPortList();
+    else if (auto targetModule = dyn_cast<SCModuleOp>(target))
+      targetPorts = targetModule.getPortList();
+    else
+      return instanceOp->emitOpError("referenced operation is not a module");
+
+    for (const hw::PortInfo &targetPort : targetPorts) {
+      OrderedPort orderedPort{targetPort.dir, targetPort.argNum, {}};
+      Type valueType;
+      Type portType;
+      switch (targetPort.dir) {
+      case hw::ModulePort::Direction::Input:
+        valueType = adaptor.getInputs()[targetPort.argNum].getType();
+        portType = InputType::get(valueType);
+        break;
+      case hw::ModulePort::Direction::Output:
+        valueType = instanceOp->getResult(targetPort.argNum).getType();
+        portType = OutputType::get(valueType);
+        break;
+      case hw::ModulePort::Direction::InOut:
+        return instanceOp->emitOpError("inout ports not supported");
+      }
+      orderedPort.info.type = typeConverter->convertType(portType);
+      orderedPort.info.name = targetPort.name;
+      if (!orderedPort.info.type)
+        return instanceOp->emitOpError("failed to convert port type");
+      portInfo.push_back(orderedPort.info);
+      orderedPorts.push_back(orderedPort);
+    }
 
     Location loc = instanceOp->getLoc();
     // Generate names for C++ declarations, not Verilog hierarchical paths.
@@ -860,13 +881,14 @@ public:
     auto instDecl = InstanceDeclOp::create(rewriter, loc, instanceName,
                                            instModuleName, portInfo);
 
-    // Bind the input ports.
-    for (size_t i = 0, numInputs = adaptor.getInputs().size(); i < numInputs;
-         ++i) {
-      Value input = adaptor.getInputs()[i];
-      auto portId = rewriter.getIndexAttr(i);
+    // Bind the input ports at their position in the referenced module ABI.
+    for (auto [portIdValue, orderedPort] : llvm::enumerate(orderedPorts)) {
+      if (orderedPort.direction != hw::ModulePort::Direction::Input)
+        continue;
+      Value input = adaptor.getInputs()[orderedPort.valueIndex];
+      auto portId = rewriter.getIndexAttr(portIdValue);
       StringAttr signalName = rewriter.getStringAttr(
-          instanceName.getValue() + "_" + portInfo[i].name.getValue());
+          instanceName.getValue() + "_" + orderedPort.info.name.getValue());
 
       // Look through materialized conversions and unrealized casts to
       // recover the read of the channel this input is fed from.
@@ -889,7 +911,8 @@ public:
       }
 
       // Otherwise, create an intermediate signal to bind the instance port to.
-      Type sigType = SignalType::get(getSignalBaseType(portInfo[i].type));
+      Type sigType =
+          SignalType::get(getSignalBaseType(orderedPort.info.type));
       rewriter.restoreInsertionPoint(stateInsertPt);
       Value channel = SignalOp::create(rewriter, loc, sigType, signalName);
       rewriter.restoreInsertionPoint(initInsertPt);
@@ -898,15 +921,16 @@ public:
       SignalWriteOp::create(rewriter, loc, channel, input);
     }
 
-    // Bind the output ports.
-    for (size_t i = 0, numOutputs = instanceOp->getNumResults(); i < numOutputs;
-         ++i) {
-      size_t numInputs = adaptor.getInputs().size();
+    // Bind the output ports at their position in the referenced module ABI.
+    for (auto [portIdValue, orderedPort] : llvm::enumerate(orderedPorts)) {
+      if (orderedPort.direction != hw::ModulePort::Direction::Output)
+        continue;
+      size_t i = orderedPort.valueIndex;
       Value output = instanceOp->getResult(i);
-      auto portId = rewriter.getIndexAttr(i + numInputs);
+      auto portId = rewriter.getIndexAttr(portIdValue);
       StringAttr signalName =
           rewriter.getStringAttr(instanceName.getValue() + "_" +
-                                 portInfo[i + numInputs].name.getValue());
+                                 orderedPort.info.name.getValue());
 
       if (output.hasOneUse()) {
         Operation *soleUser = *output.user_begin();
@@ -938,7 +962,7 @@ public:
 
       // Otherwise, create an intermediate signal.
       Type sigType =
-          SignalType::get(getSignalBaseType(portInfo[i + numInputs].type));
+          SignalType::get(getSignalBaseType(orderedPort.info.type));
       rewriter.restoreInsertionPoint(stateInsertPt);
       Value channel = SignalOp::create(rewriter, loc, sigType, signalName);
       rewriter.restoreInsertionPoint(initInsertPt);
