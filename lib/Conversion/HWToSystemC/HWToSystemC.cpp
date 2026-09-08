@@ -1311,14 +1311,22 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
     // start from the adaptor and materialize an explicit conversion back to
     // the Core type. Do not look through the adaptor's conversion: its source
     // producer may already have been replaced and scheduled for erasure.
-    auto recoverCoreValue = [&](Value value, Type coreType) -> Value {
-      if (!value)
+    auto recoverCoreValue = [&](Value original, Value adapted,
+                                Type coreType) -> Value {
+      // Constants are legal Core operations, but dialect conversion may
+      // replace their mapped value before this consumer pattern runs. Rebuild
+      // the literal at the register update insertion point so the state write
+      // never references a producer pending erasure.
+      if (auto constant = original.getDefiningOp<hw::ConstantOp>())
+        return hw::ConstantOp::create(rewriter, loc, constant.getValue());
+      if (!adapted)
         return {};
-      if (value.getType() == coreType)
-        return value;
-      return ConvertOp::create(rewriter, loc, coreType, value);
+      if (adapted.getType() == coreType)
+        return adapted;
+      return ConvertOp::create(rewriter, loc, coreType, adapted);
     };
-    Value next = recoverCoreValue(adaptor.getInput(), reg.getType());
+    Value next =
+        recoverCoreValue(reg.getInput(), adaptor.getInput(), reg.getType());
     if (!next)
       return rewriter.notifyMatchFailure(reg,
                                          "failed to recover next-state value");
@@ -1327,7 +1335,8 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
                                  current);
     if (reg.getReset()) {
       Value resetValue =
-          recoverCoreValue(adaptor.getResetValue(), reg.getType());
+          recoverCoreValue(reg.getResetValue(), adaptor.getResetValue(),
+                           reg.getType());
       if (!resetValue)
         return rewriter.notifyMatchFailure(reg,
                                            "failed to recover reset value");
