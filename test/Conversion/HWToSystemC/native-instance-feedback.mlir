@@ -20,8 +20,6 @@ hw.module @Top(out observed: i1) {
 }
 
 // CHECK-LABEL: systemc.module @Top
-// CHECK: %[[LEFT_VALID:.*]] = systemc.signal : !systemc.signal<i1>
 // CHECK: %[[RIGHT_READY:.*]] = systemc.signal : !systemc.signal<i1>
-// CHECK: systemc.sensitive {{.*}}%[[LEFT_VALID]]{{.*}}%[[RIGHT_READY]]
-// CHECK: systemc.instance.bind_port {{.*}}["valid"] to %[[LEFT_VALID]]
+// CHECK: systemc.sensitive {{.*}}%[[RIGHT_READY]]
 // CHECK: systemc.instance.bind_port {{.*}}["ready"] to %[[RIGHT_READY]]

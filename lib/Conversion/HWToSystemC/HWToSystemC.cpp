@@ -440,6 +440,13 @@ preLowerInstanceChannels(SCModuleOp scModule, SCFuncOp scFunc,
   for (hw::InstanceOp instance : instances) {
     auto resultNames = instance.getResultNames();
     for (auto [index, result] : llvm::enumerate(instance.getResults())) {
+      bool hasBackwardUse = llvm::any_of(result.getUses(), [&](OpOperand &use) {
+        Operation *owner = use.getOwner();
+        return owner->getBlock() == instance->getBlock() &&
+               owner->isBeforeInBlock(instance);
+      });
+      if (!hasBackwardUse)
+        continue;
       Type convertedType = typeConverter.convertType(result.getType());
       if (!convertedType)
         return instance.emitError("failed to convert instance result type");
@@ -919,7 +926,15 @@ public:
                                  portInfo[i + numInputs].name.getValue());
 
       if (output.hasOneUse()) {
-        if (auto writeOp = dyn_cast<SignalWriteOp>(*output.user_begin())) {
+        Operation *soleUser = *output.user_begin();
+        Operation *conversion = nullptr;
+        if (isa<ConvertOp, UnrealizedConversionCastOp>(soleUser) &&
+            soleUser->getNumResults() == 1 &&
+            soleUser->getResult(0).hasOneUse()) {
+          conversion = soleUser;
+          soleUser = *soleUser->getResult(0).user_begin();
+        }
+        if (auto writeOp = dyn_cast<SignalWriteOp>(soleUser)) {
           // Use the channel written to directly. When there are multiple
           // channels this value is written to or it is used somewhere else, we
           // cannot shortcut it and have to insert an intermediate value because
@@ -930,6 +945,8 @@ public:
           BindPortOp::create(rewriter, loc, instDecl, portId,
                              writeOp.getDest());
           writeOp->erase();
+          if (conversion && conversion->use_empty())
+            rewriter.eraseOp(conversion);
           continue;
         }
       }
