@@ -1300,13 +1300,17 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
         rewriter, loc, reg.getType(), stateRead);
 
     rewriter.setInsertionPointToEnd(scFunc.getBodyBlock());
-    Value next = reg.getInput();
+    // Use the conversion adaptor here. The original operands may already have
+    // been replaced while dialect conversion is rewriting the enclosing
+    // method; materializing a conversion from those stale values can crash
+    // instead of producing a legalization diagnostic.
+    Value next = adaptor.getInput();
     if constexpr (std::is_same_v<OpTy, seq::CompRegClockEnabledOp>)
-      next = comb::MuxOp::create(rewriter, loc, reg.getClockEnable(), next,
+      next = comb::MuxOp::create(rewriter, loc, adaptor.getClockEnable(), next,
                                  current);
     if (reg.getReset())
-      next = comb::MuxOp::create(rewriter, loc, reg.getReset(),
-                                 reg.getResetValue(), next);
+      next = comb::MuxOp::create(rewriter, loc, adaptor.getReset(),
+                                 adaptor.getResetValue(), next);
 
     Value posedge = SignalPosedgeOp::create(rewriter, loc, clockChannel);
     next = comb::MuxOp::create(rewriter, loc, posedge, next, current);
