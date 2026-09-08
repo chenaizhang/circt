@@ -418,6 +418,76 @@ preLowerInteropChannels(SCModuleOp scModule, SCFuncOp scFunc,
   return success();
 }
 
+// Materialize every native HW instance output as a SystemC channel before
+// moving the graph region into an SSACFG function body.  Elaborated RTL often
+// contains legal feedback between sibling modules (for example reset and
+// configuration paths).  Such edges do not imply a combinational C++ value
+// cycle: SystemC resolves them through bound channels and delta cycles.  A
+// read placed at the beginning of the update function gives all instance
+// consumers a dominating value; ConvertInstance later recognizes the paired
+// write and binds the child output directly to this channel.
+static LogicalResult
+preLowerInstanceChannels(SCModuleOp scModule, SCFuncOp scFunc,
+                         ConversionPatternRewriter &rewriter,
+                         const TypeConverter &typeConverter,
+                         SmallVectorImpl<Value> &instanceSignals) {
+  SmallVector<hw::InstanceOp> instances;
+  scFunc.walk([&](hw::InstanceOp op) { instances.push_back(op); });
+  if (instances.empty())
+    return success();
+
+  auto ctor = scModule.getOrCreateCtor(rewriter);
+  for (hw::InstanceOp instance : instances) {
+    auto resultNames = instance.getResultNames();
+    for (auto [index, result] : llvm::enumerate(instance.getResults())) {
+      Type convertedType = typeConverter.convertType(result.getType());
+      if (!convertedType)
+        return instance.emitError("failed to convert instance result type");
+
+      std::string requested = instance.getInstanceName().str();
+      requested += "_";
+      requested += cast<StringAttr>(resultNames[index]).getValue();
+      StringAttr channelName = getUniqueStateName(
+          scModule,
+          getCxxIdentifier(rewriter.getStringAttr(requested), rewriter)
+              .getValue(),
+          rewriter);
+
+      rewriter.setInsertionPoint(ctor);
+      Value channel =
+          SignalOp::create(rewriter, instance.getLoc(),
+                           SignalType::get(convertedType), channelName)
+              .getSignal();
+
+      rewriter.setInsertionPointAfter(instance);
+      Value converted = typeConverter.materializeTargetConversion(
+          rewriter, instance.getLoc(), convertedType, result);
+      if (!converted)
+        return instance.emitError(
+            "failed to materialize instance channel write");
+      auto write =
+          SignalWriteOp::create(rewriter, instance.getLoc(), channel, converted);
+
+      rewriter.setInsertionPointToStart(scFunc.getBodyBlock());
+      Value channelRead =
+          SignalReadOp::create(rewriter, instance.getLoc(), channel);
+      Value current = typeConverter.materializeSourceConversion(
+          rewriter, instance.getLoc(), result.getType(), channelRead);
+      if (!current)
+        return instance.emitError(
+            "failed to materialize instance channel read");
+
+      Operation *convertedOp = converted.getDefiningOp();
+      result.replaceUsesWithIf(current, [&](OpOperand &use) {
+        Operation *owner = use.getOwner();
+        return owner != convertedOp && owner != write.getOperation();
+      });
+      instanceSignals.push_back(channel);
+    }
+  }
+  return success();
+}
+
 static Value findPreLoweredState(SCModuleOp module, StringAttr stateName) {
   if (!stateName)
     return {};
@@ -580,6 +650,10 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     if (failed(preLowerSequentialFeedbacks(scModule, scFunc, rewriter,
                                            *typeConverter, preLoweredStates)))
       return failure();
+    SmallVector<Value> instanceSignals;
+    if (failed(preLowerInstanceChannels(scModule, scFunc, rewriter,
+                                        *typeConverter, instanceSignals)))
+      return failure();
     SmallVector<Value> interopSignals;
     if (failed(preLowerInteropChannels(scModule, scFunc, rewriter,
                                        *typeConverter, interopSignals)))
@@ -623,6 +697,7 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
           return !isa<OutputType>(arg.getType());
         }));
     sensitivityValues.append(preLoweredStates.begin(), preLoweredStates.end());
+    sensitivityValues.append(instanceSignals.begin(), instanceSignals.end());
     sensitivityValues.append(interopSignals.begin(), interopSignals.end());
     if (!sensitivityValues.empty())
       SensitiveOp::create(rewriter, scModule.getLoc(), sensitivityValues);
