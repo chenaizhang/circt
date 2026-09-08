@@ -59,6 +59,28 @@ hw.module @single_el_mem(in %clk : i1, in %addr : i0, in %data : i8, in %we : i1
     %msingel = seq.firreg %next clock %clock : !hw.array<1xi8>
 }
 
+// Core compregs and nested hold muxes are produced by timed-process lowering
+// for memories with reset and enable control. Preserve the indexed storage as
+// a firmem instead of scalarizing or crashing in a later conversion.
+// CHECK-LABEL: hw.module @nested_compreg_mem
+hw.module @nested_compreg_mem(in %clk : i1, in %reset_n : i1, in %addr : i2,
+                              in %data : i8, in %we : i1, out out : i8) {
+  %clock = seq.to_clock %clk
+  %true = hw.constant true
+  %not_reset = comb.xor %reset_n, %true : i1
+  %read = hw.array_get %mem[%addr] : !hw.array<4xi8>, i2
+  %write = hw.array_inject %mem[%addr], %data : !hw.array<4xi8>, i2
+  %hold0 = comb.mux %true, %mem, %mem : !hw.array<4xi8>
+  %hold1 = comb.mux %not_reset, %mem, %hold0 : !hw.array<4xi8>
+  %next = comb.mux %we, %write, %hold1 : !hw.array<4xi8>
+  %mem = seq.compreg %next, %clock : !hw.array<4xi8>
+  hw.output %read : i8
+}
+// CHECK: %mem = seq.firmem 0, 1, undefined, undefined : <4 x 8, mask 1>
+// CHECK: seq.firmem.read_port %mem[%addr]
+// CHECK: seq.firmem.write_port %mem[%addr] = %data, clock %clock enable %we
+// CHECK-NOT: seq.compreg {{.*}} : !hw.array<4xi8>
+
 // CHECK: %[[clock:.+]] = seq.to_clock %clk
 // CHECK: %mem = seq.firmem 0, 1, undefined, undefined : <1 x 8, mask 1>
 // CHECK: %[[FALSE:.+]] = hw.constant false

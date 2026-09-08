@@ -18,8 +18,12 @@
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
+
+#include <type_traits>
 
 #define DEBUG_TYPE "reg-of-vec-to-mem"
 
@@ -37,7 +41,9 @@ namespace seq {
 namespace {
 
 struct MemoryPattern {
-  FirRegOp memReg;               // The register array representing memory
+  Operation *memReg = nullptr;   // The register array representing memory
+  Value memValue;                // Current array value
+  Type memType;                  // Array type
   FirRegOp outputReg;            // Optional output register
   Value clock;                   // Clock signal
   Value readAddr;                // Read address
@@ -45,7 +51,8 @@ struct MemoryPattern {
   Value writeData;               // Write data
   Value writeEnable;             // Write enable
   Value readEnable;              // Read enable (optional)
-  comb::MuxOp writeMux;          // Mux selecting between old/new memory state
+  SmallVector<comb::MuxOp> writeMuxes; // Mux tree selecting old/new state
+  SmallVector<std::pair<Value, bool>> writeGuards; // condition and polarity
   comb::MuxOp readMux;           // Mux for read data
   hw::ArrayGetOp readAccess;     // Array read operation
   hw::ArrayInjectOp writeAccess; // Array write operation
@@ -56,7 +63,8 @@ public:
   void runOnOperation() override;
 
 private:
-  bool analyzeMemoryPattern(FirRegOp reg, MemoryPattern &pattern);
+  template <typename RegOp>
+  bool analyzeMemoryPattern(RegOp reg, MemoryPattern &pattern);
   bool createFirMemory(MemoryPattern &pattern);
   bool isArrayType(Type type);
   std::optional<std::pair<uint64_t, uint64_t>> getArrayDimensions(Type type);
@@ -81,7 +89,38 @@ RegOfVecToMemPass::getArrayDimensions(Type type) {
   return std::nullopt;
 }
 
-bool RegOfVecToMemPass::analyzeMemoryPattern(FirRegOp reg,
+static bool isHoldValue(Value value, Value current,
+                        SmallVectorImpl<comb::MuxOp> *muxes = nullptr) {
+  if (value == current)
+    return true;
+  auto mux = value.getDefiningOp<comb::MuxOp>();
+  if (!mux || !isHoldValue(mux.getTrueValue(), current, muxes) ||
+      !isHoldValue(mux.getFalseValue(), current, muxes))
+    return false;
+  if (muxes)
+    muxes->push_back(mux);
+  return true;
+}
+
+static bool dependsOn(Value value, Operation *target, Value stopValue,
+                      llvm::SmallPtrSetImpl<Operation *> &visited) {
+  if (value == stopValue)
+    return false;
+  Operation *operation = value.getDefiningOp();
+  if (!operation)
+    return false;
+  if (operation == target)
+    return true;
+  if (!visited.insert(operation).second)
+    return false;
+  return llvm::any_of(operation->getOperands(),
+                      [&](Value operand) {
+                        return dependsOn(operand, target, stopValue, visited);
+                      });
+}
+
+template <typename RegOp>
+bool RegOfVecToMemPass::analyzeMemoryPattern(RegOp reg,
                                              MemoryPattern &pattern) {
   LLVM_DEBUG(llvm::dbgs() << "Analyzing register: " << reg << "\n");
 
@@ -91,7 +130,6 @@ bool RegOfVecToMemPass::analyzeMemoryPattern(FirRegOp reg,
 
   ArrayGetOp readAccess;
   ArrayInjectOp writeAccess;
-  comb::MuxOp writeMux;
   for (auto *user : reg.getResult().getUsers()) {
     LLVM_DEBUG(llvm::dbgs() << "  Register user: " << *user << "\n");
     if (auto arrayGet = dyn_cast<hw::ArrayGetOp>(user); !readAccess && arrayGet)
@@ -99,50 +137,64 @@ bool RegOfVecToMemPass::analyzeMemoryPattern(FirRegOp reg,
     else if (auto arrayInject = dyn_cast<hw::ArrayInjectOp>(user);
              !writeAccess && arrayInject)
       writeAccess = arrayInject;
-    else if (auto mux = dyn_cast<comb::MuxOp>(user); !writeMux && mux)
-      writeMux = mux;
+    else if (isa<comb::MuxOp>(user))
+      continue;
     else
       return false;
   }
-  if (!readAccess || !writeAccess || !writeMux)
+  if (!readAccess || !writeAccess)
     return false;
 
-  pattern.memReg = reg;
+  pattern.memReg = reg.getOperation();
+  pattern.memValue = reg.getResult();
+  pattern.memType = reg.getType();
   pattern.clock = reg.getClk();
 
   // Find the mux that drives this register
-  auto nextValue = reg.getNext();
+  Value nextValue;
+  if constexpr (std::is_same_v<RegOp, FirRegOp>)
+    nextValue = reg.getNext();
+  else
+    nextValue = reg.getInput();
   auto mux = nextValue.getDefiningOp<comb::MuxOp>();
   if (!mux)
     return false;
 
   LLVM_DEBUG(llvm::dbgs() << "  Found driving mux: " << mux << "\n");
-  pattern.writeMux = mux;
-
-  // Check that the mux is only used by this register (safety check)
-  if (!mux.getResult().hasOneUse()) {
-    LLVM_DEBUG(llvm::dbgs() << "  Mux has multiple uses, cannot transform\n");
-    return false;
+  // Follow a nested mux tree from next-state to the single indexed write.
+  // Reset/enable lowering often creates several muxes whose other branch is
+  // just a (possibly redundant) hold expression.
+  Value cursor = nextValue;
+  auto arrayInject = writeAccess;
+  while (cursor != arrayInject.getResult()) {
+    auto updateMux = cursor.getDefiningOp<comb::MuxOp>();
+    if (!updateMux)
+      return false;
+    pattern.writeMuxes.push_back(updateMux);
+    llvm::SmallPtrSet<Operation *, 16> trueVisited;
+    llvm::SmallPtrSet<Operation *, 16> falseVisited;
+    bool writeOnTrue = dependsOn(updateMux.getTrueValue(), arrayInject,
+                                 reg.getResult(), trueVisited);
+    bool writeOnFalse = dependsOn(updateMux.getFalseValue(), arrayInject,
+                                  reg.getResult(), falseVisited);
+    if (writeOnTrue == writeOnFalse)
+      return false;
+    Value hold = writeOnTrue ? updateMux.getFalseValue()
+                             : updateMux.getTrueValue();
+    if (!isHoldValue(hold, reg.getResult(), &pattern.writeMuxes))
+      return false;
+    pattern.writeGuards.push_back({updateMux.getCond(), writeOnTrue});
+    cursor = writeOnTrue ? updateMux.getTrueValue()
+                         : updateMux.getFalseValue();
   }
-
-  // Analyze mux inputs: sel ? write_result : current_memory
-  Value writeResult = mux.getTrueValue();
-  Value currentMemory = mux.getFalseValue();
-
-  // Check if false value is the current register (feedback)
-  if (currentMemory != reg.getResult())
-    return false;
-
-  // Look for array_inject operation in write path
-  auto arrayInject = writeResult.getDefiningOp<hw::ArrayInjectOp>();
-  if (!arrayInject)
+  if (arrayInject.getInput() != reg.getResult())
     return false;
 
   LLVM_DEBUG(llvm::dbgs() << "  Found array_inject: " << arrayInject << "\n");
   pattern.writeAccess = arrayInject;
   pattern.writeAddr = arrayInject.getIndex();
   pattern.writeData = arrayInject.getElement();
-  pattern.writeEnable = mux.getCond();
+  pattern.writeEnable = {};
 
   // Look for read pattern - find array_get users
   auto arrayGet = readAccess;
@@ -171,7 +223,7 @@ bool RegOfVecToMemPass::analyzeMemoryPattern(FirRegOp reg,
 bool RegOfVecToMemPass::createFirMemory(MemoryPattern &pattern) {
   LLVM_DEBUG(llvm::dbgs() << "Creating FirMemory for pattern\n");
 
-  auto dims = getArrayDimensions(pattern.memReg.getType());
+  auto dims = getArrayDimensions(pattern.memType);
   if (!dims)
     return false;
 
@@ -181,7 +233,7 @@ bool RegOfVecToMemPass::createFirMemory(MemoryPattern &pattern) {
   LLVM_DEBUG(llvm::dbgs() << "  Memory dimensions: " << depth << " x " << width
                           << "\n");
 
-  ImplicitLocOpBuilder builder(pattern.memReg.getLoc(), pattern.memReg);
+  ImplicitLocOpBuilder builder(pattern.memReg->getLoc(), pattern.memReg);
 
   // Create FirMem
   auto memType =
@@ -218,8 +270,22 @@ bool RegOfVecToMemPass::createFirMemory(MemoryPattern &pattern) {
   Value mask;
   // Create write port
   auto writeAddr = fixZeroWidthAddr(pattern.writeAddr);
+  Value trueValue = hw::ConstantOp::create(builder, builder.getI1Type(), 1);
+  Value writeEnable;
+  for (auto [condition, positive] : pattern.writeGuards) {
+    Value guard = condition;
+    if (!positive)
+      guard = comb::XorOp::create(builder, pattern.memReg->getLoc(), guard,
+                                  trueValue);
+    writeEnable = writeEnable
+                      ? comb::AndOp::create(builder, pattern.memReg->getLoc(),
+                                            writeEnable, guard, true)
+                      : guard;
+  }
+  if (!writeEnable)
+    writeEnable = trueValue;
   FirMemWriteOp::create(builder, firMem, writeAddr, pattern.clock,
-                        pattern.writeEnable, pattern.writeData, mask);
+                        writeEnable, pattern.writeData, mask);
 
   LLVM_DEBUG(llvm::dbgs() << "  Created write port\n");
 
@@ -237,8 +303,10 @@ bool RegOfVecToMemPass::createFirMemory(MemoryPattern &pattern) {
     opsToErase.push_back(pattern.readAccess);
   if (pattern.writeAccess)
     opsToErase.push_back(pattern.writeAccess);
-  if (pattern.writeMux)
-    opsToErase.push_back(pattern.writeMux);
+  llvm::SmallPtrSet<Operation *, 8> seenMuxes;
+  for (comb::MuxOp mux : pattern.writeMuxes)
+    if (seenMuxes.insert(mux).second)
+      opsToErase.push_back(mux);
 
   return true;
 }
@@ -246,21 +314,28 @@ bool RegOfVecToMemPass::createFirMemory(MemoryPattern &pattern) {
 void RegOfVecToMemPass::runOnOperation() {
   auto module = getOperation();
 
-  SmallVector<FirRegOp> arrayRegs;
+  SmallVector<Operation *> arrayRegs;
 
-  // Collect all FirRegOp with array types
+  // Both FIRRTL and Core register forms can represent an inferred memory.
   module.walk([&](FirRegOp reg) {
-    if (isArrayType(reg.getType())) {
+    if (isArrayType(reg.getType()))
       arrayRegs.push_back(reg);
-    }
+  });
+  module.walk([&](CompRegOp reg) {
+    if (isArrayType(reg.getType()))
+      arrayRegs.push_back(reg);
   });
 
   // Analyze each array register for memory patterns
-  for (auto reg : arrayRegs) {
+  for (Operation *reg : arrayRegs) {
     MemoryPattern pattern;
-    if (analyzeMemoryPattern(reg, pattern)) {
+    bool matched = TypeSwitch<Operation *, bool>(reg)
+                       .Case<FirRegOp, CompRegOp>([&](auto typedReg) {
+                         return analyzeMemoryPattern(typedReg, pattern);
+                       })
+                       .Default(false);
+    if (matched)
       createFirMemory(pattern);
-    }
   }
 
   // Erase all marked operations
