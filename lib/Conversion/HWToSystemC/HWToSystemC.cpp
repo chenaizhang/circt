@@ -440,13 +440,6 @@ preLowerInstanceChannels(SCModuleOp scModule, SCFuncOp scFunc,
   for (hw::InstanceOp instance : instances) {
     auto resultNames = instance.getResultNames();
     for (auto [index, result] : llvm::enumerate(instance.getResults())) {
-      bool hasBackwardUse = llvm::any_of(result.getUses(), [&](OpOperand &use) {
-        Operation *owner = use.getOwner();
-        return owner->getBlock() == instance->getBlock() &&
-               owner->isBeforeInBlock(instance);
-      });
-      if (!hasBackwardUse)
-        continue;
       Type convertedType = typeConverter.convertType(result.getType());
       if (!convertedType)
         return instance.emitError("failed to convert instance result type");
