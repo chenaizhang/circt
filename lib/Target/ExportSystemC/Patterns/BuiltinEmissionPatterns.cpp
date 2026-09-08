@@ -12,8 +12,13 @@
 
 #include "BuiltinEmissionPatterns.h"
 #include "../EmissionPrinter.h"
+#include "circt/Dialect/SystemC/SystemCOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringMap.h"
+
+#include <functional>
 
 using namespace mlir;
 using namespace circt;
@@ -31,7 +36,47 @@ struct ModuleEmitter : OpEmissionPattern<ModuleOp> {
   using OpEmissionPattern::OpEmissionPattern;
   void emitStatement(ModuleOp op, EmissionPrinter &p) override {
     auto scope = p.getOstream().scope("", "", false);
-    p.emitRegion(op.getRegion(), scope);
+
+    // Emit declarations and includes first, then emit SystemC modules in
+    // dependency order. A module contains child instances by value, so merely
+    // forward-declaring a child class is insufficient in C++: the complete
+    // child SC_MODULE must appear before its parent.
+    llvm::StringMap<systemc::SCModuleOp> modules;
+    SmallVector<systemc::SCModuleOp> moduleOrder;
+    for (Operation &child : op.getBody()->getOperations()) {
+      if (auto module = dyn_cast<systemc::SCModuleOp>(child)) {
+        modules.try_emplace(module.getModuleName(), module);
+        moduleOrder.push_back(module);
+      } else {
+        p.emitOp(&child);
+      }
+    }
+
+    llvm::SmallPtrSet<Operation *, 16> active;
+    llvm::SmallPtrSet<Operation *, 16> emitted;
+    std::function<void(systemc::SCModuleOp)> emitModule =
+        [&](systemc::SCModuleOp module) {
+          if (emitted.contains(module))
+            return;
+          if (!active.insert(module).second) {
+            p.emitError(module.getOperation(),
+                        "cyclic SystemC module instantiation is not supported");
+            return;
+          }
+
+          module.walk([&](systemc::InstanceDeclOp instance) {
+            auto target = modules.find(instance.getModuleName());
+            if (target != modules.end())
+              emitModule(target->second);
+          });
+
+          active.erase(module);
+          emitted.insert(module);
+          p.emitOp(module);
+        };
+
+    for (systemc::SCModuleOp module : moduleOrder)
+      emitModule(module);
   }
 };
 
