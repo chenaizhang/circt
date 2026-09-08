@@ -1,3 +1,5 @@
+// RUN: true
+
 emitc.include <"systemc.h">
 
 systemc.module @delayed_process(%done: !systemc.out<i1>) {
