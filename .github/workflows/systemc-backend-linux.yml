@@ -80,6 +80,8 @@ jobs:
             bash test/Target/ExportSystemC/verilated-mixed/run.sh
           CIRCT_BUILD_DIR="$PWD/build" \
             bash test/Target/ExportSystemC/memory-runtime/run.sh
+          CIRCT_BUILD_DIR="$PWD/build" \
+            bash test/Target/ExportSystemC/thread-runtime/run.sh
 
       - name: Install and package
         run: |
@@ -92,7 +94,7 @@ jobs:
           source=https://github.com/${GITHUB_REPOSITORY}
           revision=${GITHUB_SHA}
           runner=ubuntu-24.04-x86_64
-          validation=SystemC dialect/HW-to-SystemC/ExportSystemC lit tests plus Verilator mixed and memory runtime integration
+          validation=SystemC dialect/HW-to-SystemC/ExportSystemC lit tests plus Verilator mixed, memory, and timed-thread runtime integration
           EOF
           ldd "$package_root/bin/circt-opt"
           ldd "$package_root/bin/circt-translate"
