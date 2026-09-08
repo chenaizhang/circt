@@ -362,9 +362,9 @@ struct MemoryWriteEmitter : OpEmissionPattern<MemoryWriteOp> {
   using OpEmissionPattern::OpEmissionPattern;
 
   void emitStatement(MemoryWriteOp op, EmissionPrinter &p) override {
-    p << "if (";
+    p << "if ((";
     p.getInlinable(op.getCondition()).emit();
-    p << ") ";
+    p << ") != 0) ";
     p.getInlinable(op.getMemory()).emit();
     p << "[";
     p.getInlinable(op.getAddress()).emit();

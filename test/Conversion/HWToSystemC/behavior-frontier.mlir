@@ -16,12 +16,12 @@ hw.module @top(in %a: i8, in %b: i8, out result: i8) {
 // CHECK: systemc.hierarchy.frontier
 // CHECK: systemc.method %behaviorSlot
 // CHECK-LABEL: systemc.module @top
-// CHECK: comb.add
 // CHECK: systemc.instance.decl @leaf
+// CHECK: comb.add
 
 // CPP-LABEL: SC_MODULE(leaf)
 // CPP: SC_METHOD(behaviorSlot);
 // CPP-LABEL: SC_MODULE(top)
-// CPP: sc_uint<8>(a.read()) + sc_uint<8>(b.read())
 // CPP: leaf leaf{"leaf"};
+// CPP: sc_uint<8>(a.read()) + sc_uint<8>(b.read())
 // CPP-NOT: UNSUPPORTED OPERATION

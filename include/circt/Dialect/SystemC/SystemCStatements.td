@@ -82,8 +82,8 @@ def MemoryOp : SystemCOp<"memory", [
 
 def MemoryReadOp : SystemCOp<"memory.read", []> {
   let summary = "Reads one element from a SystemC simulation memory.";
-  let arguments = (ins AnyType:$memory, AnySignlessInteger:$address);
-  let results = (outs AnySignlessInteger:$data);
+  let arguments = (ins AnyType:$memory, AnyType:$address);
+  let results = (outs AnyType:$data);
   let assemblyFormat = [{
     $memory `[` $address `]` attr-dict `:` type($memory) `,` type($address)
       `->` type($data)
@@ -96,8 +96,8 @@ def MemoryWriteOp : SystemCOp<"memory.write", []> {
     The write is performed when `condition` is true. HW-to-SystemC combines
     the source clock edge, enable, and supported write mask into this value.
   }];
-  let arguments = (ins AnyType:$memory, AnySignlessInteger:$address,
-                       AnySignlessInteger:$data, I1:$condition);
+  let arguments = (ins AnyType:$memory, AnyType:$address,
+                       AnyType:$data, AnyType:$condition);
   let assemblyFormat = [{
     $memory `[` $address `]` `=` $data `if` $condition attr-dict `:`
       type($memory) `,` type($address) `,` type($data)
