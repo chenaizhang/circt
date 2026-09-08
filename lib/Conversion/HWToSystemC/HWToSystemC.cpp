@@ -1308,22 +1308,15 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
     rewriter.setInsertionPointToEnd(scFunc.getBodyBlock());
     // Keep the next-state cone in the Core integer domain until the final
     // state write. The original producer may already have been rewritten, so
-    // start from the adaptor but look through its target materialization when
-    // possible. This avoids both stale operands and redundant round trips.
+    // start from the adaptor and materialize an explicit conversion back to
+    // the Core type. Do not look through the adaptor's conversion: its source
+    // producer may already have been replaced and scheduled for erasure.
     auto recoverCoreValue = [&](Value value, Type coreType) -> Value {
       if (!value)
         return {};
       if (value.getType() == coreType)
         return value;
-      if (auto convert = value.getDefiningOp<ConvertOp>();
-          convert && convert.getInput().getType() == coreType)
-        return convert.getInput();
-      if (auto cast = value.getDefiningOp<UnrealizedConversionCastOp>();
-          cast && cast->getNumOperands() == 1 &&
-          cast->getOperand(0).getType() == coreType)
-        return cast->getOperand(0);
-      return this->getTypeConverter()->materializeSourceConversion(
-          rewriter, loc, coreType, value);
+      return ConvertOp::create(rewriter, loc, coreType, value);
     };
     Value next = recoverCoreValue(adaptor.getInput(), reg.getType());
     if (!next)
