@@ -39,6 +39,20 @@ def SignalWriteOp : SystemCOp<"signal.write", [
   let assemblyFormat = "$dest `,` $src attr-dict `:` qualified(type($dest))";
 }
 
+def RegisterWriteOp : SystemCOp<"register.write", []> {
+  let summary = "Conditionally updates a register-backed SystemC signal";
+  let description = [{
+    Represents the clock edge, enable, and reset semantics of a hardware
+    register without first encoding the update as a feedback mux graph.  This
+    keeps sequential state explicit during HW-to-SystemC conversion and lets
+    ExportSystemC emit the corresponding C++ control flow directly.
+  }];
+
+  let arguments = (ins SignalType:$dest, AnyType:$src, ChannelType:$clock,
+                       I1:$enable, I1:$reset, AnyType:$resetValue,
+                       BoolAttr:$isAsync);
+}
+
 def SignalOp : SystemCOp<"signal", [HasCustomSSAName,
                                     SystemCNameDeclOpInterface,
                                     HasParent<"SCModuleOp">]> {

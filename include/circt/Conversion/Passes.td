@@ -605,10 +605,9 @@ def ConvertHWToSystemC : Pass<"convert-hw-to-systemc", "mlir::ModuleOp"> {
       "Emit only SystemC modules, ports, instances, bindings, signals, and "
       "empty SC_METHOD shells. Comb/Seq behavior is intentionally omitted.">,
     Option<"preparedInput", "prepared-input", "bool", "false",
-      "Assume HW aggregate ports and aggregate operations have already been "
-      "lowered by an explicit preparation pipeline. This allows interop "
-      "instances to be inserted between preparation and HW-to-SystemC "
-      "conversion.">,
+      "Compatibility option: the conversion pass consumes prepared scalar "
+      "HW. Use --lower-hw-to-systemc for automatic aggregate preparation, or "
+      "prepare explicitly before inserting interop instances.">,
   ];
   let dependentDialects = ["systemc::SystemCDialect", "mlir::emitc::EmitCDialect",
                            "seq::SeqDialect"];

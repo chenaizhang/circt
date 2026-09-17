@@ -202,3 +202,15 @@ hw.module @aggregate_reg(in %clk : !seq.clock, in %rst : i1, in %next : !hw.stru
   %e = hw.struct_extract %r["a"] : !hw.struct<a: i8, b: i4>
   hw.output %e : i8
 }
+
+// CHECK-LABEL: @aggregate_reg_without_reset
+hw.module @aggregate_reg_without_reset(in %clk : !seq.clock, in %next : !hw.array<2xi8>, out out: i8) {
+  // CHECK: seq.firreg %{{.+}} clock %clk : i8
+  // CHECK: seq.firreg %{{.+}} clock %clk : i8
+  // CHECK: comb.concat
+  // CHECK-NOT: !hw.array
+  %r = seq.firreg %next clock %clk : !hw.array<2xi8>
+  %c0_i1 = hw.constant 0 : i1
+  %e = hw.array_get %r[%c0_i1] : !hw.array<2xi8>, i1
+  hw.output %e : i8
+}

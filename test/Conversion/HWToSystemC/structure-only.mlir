@@ -1,5 +1,6 @@
 // RUN: circt-opt --convert-hw-to-systemc="structure-only=true" %s | FileCheck %s --check-prefix=IR
 // RUN: circt-opt --convert-hw-to-systemc="structure-only=true" %s | circt-translate --export-systemc | FileCheck %s --check-prefix=CPP
+// RUN: circt-opt --lower-hw-to-systemc-structure %s | FileCheck %s --check-prefix=IR
 
 // The structure-only route must not inspect or emit Comb/Seq behavior.  It
 // preserves module ports, child instances and shared SSA connection groups.

@@ -1,4 +1,4 @@
-// RUN: circt-opt --convert-hw-to-systemc --verify-diagnostics %s | FileCheck %s
+// RUN: circt-opt --lower-hw-to-systemc --verify-diagnostics %s | FileCheck %s
 
 // Aggregate ports are flattened into scalar ports (with '_' join) and
 // aggregate operations are lowered to comb before the conversion.

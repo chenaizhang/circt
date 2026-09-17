@@ -22,6 +22,7 @@
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/DenseMap.h"
@@ -29,6 +30,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include <functional>
@@ -345,9 +347,7 @@ static LogicalResult preLowerSequentialFeedbacks(
         rewriter, reg->getLoc(), reg->getResult(0).getType(), stateRead);
     if (!current)
       return reg->emitError("failed to materialize sequential state read");
-    for (Operation *user :
-         llvm::make_early_inc_range(reg->getResult(0).getUsers()))
-      user->replaceUsesOfWith(reg->getResult(0), current);
+    reg->getResult(0).replaceAllUsesWith(current);
     stateSignals.push_back(state);
   }
   return success();
@@ -1137,13 +1137,19 @@ struct ConvertFirMemRead : public OpConversionPattern<seq::FirMemReadOp> {
                                          "memory allocation is not converted");
     int32_t latency = memory.getReadLatency();
     if (latency == 0) {
-      if (read.getEnable())
-        return rewriter.notifyMatchFailure(
-            read, "enabled asynchronous reads are not supported");
+      if (read.getEnable()) {
+        auto enable = adaptor.getEnable().getDefiningOp<hw::ConstantOp>();
+        if (!enable || !enable.getValue().isOne())
+          return rewriter.notifyMatchFailure(
+              read, "non-constant enabled asynchronous reads are not supported");
+      }
+      Type storageType = getTypeConverter()->convertType(read.getType());
       auto value = createMemoryRead(rewriter, read.getLoc(),
                                     adaptor.getMemory(), adaptor.getAddress(),
-                                    read.getType());
-      rewriter.replaceOp(read, value.getData());
+                                    storageType);
+      Value sourceValue = getTypeConverter()->materializeSourceConversion(
+          rewriter, read.getLoc(), read.getType(), value.getData());
+      rewriter.replaceOp(read, sourceValue);
       return success();
     }
     if (latency != 1)
@@ -1171,7 +1177,8 @@ struct ConvertFirMemRead : public OpConversionPattern<seq::FirMemReadOp> {
                       .getSignal();
 
     for (auto sensitivity : ctor.getBodyBlock()->getOps<SensitiveOp>()) {
-      sensitivity.getSensitivitiesMutable().append(state);
+      if (!llvm::is_contained(sensitivity.getSensitivities(), state))
+        sensitivity.getSensitivitiesMutable().append(state);
       break;
     }
 
@@ -1181,9 +1188,11 @@ struct ConvertFirMemRead : public OpConversionPattern<seq::FirMemReadOp> {
         rewriter, read.getLoc(), read.getType(), stateRead);
 
     rewriter.setInsertionPoint(read);
-    Value arrayValue = createMemoryRead(rewriter, read.getLoc(),
-                                        adaptor.getMemory(), adaptor.getAddress(),
-                                        read.getType());
+    Value storedValue =
+        createMemoryRead(rewriter, read.getLoc(), adaptor.getMemory(),
+                         adaptor.getAddress(), stateType);
+    Value arrayValue = getTypeConverter()->materializeSourceConversion(
+        rewriter, read.getLoc(), read.getType(), storedValue);
     Value condition = SignalPosedgeOp::create(rewriter, read.getLoc(),
                                               clockChannel);
     if (adaptor.getEnable())
@@ -1252,6 +1261,18 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
       return rewriter.notifyMatchFailure(reg,
                                          "initial values are not supported");
 
+    // Capture literal operands before creating any converted operations.
+    // Dialect conversion may replace a constant while this pattern is still
+    // running, which makes a Value referring to the old result unusable.
+    std::optional<APInt> inputConstant;
+    if (auto constant = reg.getInput().template getDefiningOp<hw::ConstantOp>())
+      inputConstant = constant.getValue();
+    std::optional<APInt> resetConstant;
+    if (reg.getReset())
+      if (auto constant =
+              reg.getResetValue().template getDefiningOp<hw::ConstantOp>())
+        resetConstant = constant.getValue();
+
     auto scModule = reg->template getParentOfType<SCModuleOp>();
     if (!scModule)
       return rewriter.notifyMatchFailure(reg, "parent is not an SCModuleOp");
@@ -1290,9 +1311,10 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
     SensitiveOp sensitivity;
     for (auto candidate : ctor.getBodyBlock()->template getOps<SensitiveOp>())
       sensitivity = candidate;
-    if (sensitivity)
-      sensitivity.getSensitivitiesMutable().append(state);
-    else {
+    if (sensitivity) {
+      if (!llvm::is_contained(sensitivity.getSensitivities(), state))
+        sensitivity.getSensitivitiesMutable().append(state);
+    } else {
       rewriter.setInsertionPointToStart(ctor.getBodyBlock());
       SensitiveOp::create(rewriter, loc, ValueRange{state});
     }
@@ -1306,53 +1328,30 @@ struct ConvertCompReg : public OpConversionPattern<OpTy> {
                                          "failed to read converted state");
 
     rewriter.setInsertionPointToEnd(scFunc.getBodyBlock());
-    // Keep the next-state cone in the Core integer domain until the final
-    // state write. The original producer may already have been rewritten, so
-    // start from the adaptor and materialize an explicit conversion back to
-    // the Core type. Do not look through the adaptor's conversion: its source
-    // producer may already have been replaced and scheduled for erasure.
-    auto recoverCoreValue = [&](Value original, Value adapted,
-                                Type coreType) -> Value {
-      // Constants are legal Core operations, but dialect conversion may
-      // replace their mapped value before this consumer pattern runs. Rebuild
-      // the literal at the register update insertion point so the state write
-      // never references a producer pending erasure.
-      if (auto constant = original.getDefiningOp<hw::ConstantOp>())
-        return hw::ConstantOp::create(rewriter, loc, constant.getValue());
-      if (!adapted)
-        return {};
-      if (adapted.getType() == coreType)
-        return adapted;
-      return ConvertOp::create(rewriter, loc, coreType, adapted);
-    };
-    Value next =
-        recoverCoreValue(reg.getInput(), adaptor.getInput(), reg.getType());
-    if (!next)
-      return rewriter.notifyMatchFailure(reg,
-                                         "failed to recover next-state value");
+    // Keep register control explicit instead of constructing a feedback mux
+    // graph inside dialect conversion.  The latter can invalidate newly
+    // created SSA values while their producers are being remapped.
+    Value next = inputConstant
+                     ? Value(hw::ConstantOp::create(rewriter, loc,
+                                                    *inputConstant))
+                     : adaptor.getInput();
+    Value enable = hw::ConstantOp::create(rewriter, loc, APInt(1, 1));
     if constexpr (std::is_same_v<OpTy, seq::CompRegClockEnabledOp>)
-      next = comb::MuxOp::create(rewriter, loc, adaptor.getClockEnable(), next,
-                                 current);
+      enable = adaptor.getClockEnable();
+    Value reset = hw::ConstantOp::create(rewriter, loc, APInt(1, 0));
+    Value resetValue = next;
     if (reg.getReset()) {
-      Value resetValue =
-          recoverCoreValue(reg.getResetValue(), adaptor.getResetValue(),
-                           reg.getType());
-      if (!resetValue)
-        return rewriter.notifyMatchFailure(reg,
-                                           "failed to recover reset value");
-      next = comb::MuxOp::create(rewriter, loc, adaptor.getReset(), resetValue,
-                                 next);
+      reset = adaptor.getReset();
+      resetValue = resetConstant
+                       ? Value(hw::ConstantOp::create(rewriter, loc,
+                                                      *resetConstant))
+                       : adaptor.getResetValue();
     }
-
-    Value posedge = SignalPosedgeOp::create(rewriter, loc, clockChannel);
-    next = comb::MuxOp::create(rewriter, loc, posedge, next, current);
-    Value converted = next;
-    if (converted.getType() != stateType)
-      converted = ConvertOp::create(rewriter, loc, stateType, converted);
-    if (!converted)
-      return rewriter.notifyMatchFailure(reg,
-                                         "failed to write converted state");
-    SignalWriteOp::create(rewriter, loc, state, converted);
+    if (!state || !next || !clockChannel || !enable || !reset || !resetValue)
+      return reg.emitOpError(
+          "failed to resolve all operands for SystemC register update");
+    RegisterWriteOp::create(rewriter, loc, state, next, clockChannel, enable,
+                            reset, resetValue, rewriter.getBoolAttr(false));
 
     rewriter.replaceOp(reg, current);
     return success();
@@ -1371,6 +1370,14 @@ struct ConvertFirReg : public OpConversionPattern<seq::FirRegOp> {
     if (reg.hasPresetValue())
       return rewriter.notifyMatchFailure(reg,
                                          "preset values are not supported");
+
+    std::optional<APInt> nextConstant;
+    if (auto constant = reg.getNext().getDefiningOp<hw::ConstantOp>())
+      nextConstant = constant.getValue();
+    std::optional<APInt> resetConstant;
+    if (reg.getReset())
+      if (auto constant = reg.getResetValue().getDefiningOp<hw::ConstantOp>())
+        resetConstant = constant.getValue();
 
     auto scModule = reg->getParentOfType<SCModuleOp>();
     if (!scModule)
@@ -1404,9 +1411,10 @@ struct ConvertFirReg : public OpConversionPattern<seq::FirRegOp> {
     SensitiveOp sensitivity;
     for (auto candidate : ctor.getBodyBlock()->getOps<SensitiveOp>())
       sensitivity = candidate;
-    if (sensitivity)
-      sensitivity.getSensitivitiesMutable().append(state);
-    else {
+    if (sensitivity) {
+      if (!llvm::is_contained(sensitivity.getSensitivities(), state))
+        sensitivity.getSensitivitiesMutable().append(state);
+    } else {
       rewriter.setInsertionPointToStart(ctor.getBodyBlock());
       SensitiveOp::create(rewriter, loc, ValueRange{state});
     }
@@ -1417,20 +1425,26 @@ struct ConvertFirReg : public OpConversionPattern<seq::FirRegOp> {
         rewriter, loc, reg.getType(), stateRead);
 
     rewriter.setInsertionPointToEnd(scFunc.getBodyBlock());
-    Value posedge = SignalPosedgeOp::create(rewriter, loc, clockChannel);
-
-    Value next = reg.getNext();
-    if (reg.getReset() && !reg.getIsAsync())
-      next = comb::MuxOp::create(rewriter, loc, reg.getReset(),
-                                 reg.getResetValue(), next);
-    next = comb::MuxOp::create(rewriter, loc, posedge, next, current);
-    if (reg.getReset() && reg.getIsAsync())
-      next = comb::MuxOp::create(rewriter, loc, reg.getReset(),
-                                 reg.getResetValue(), next);
-
-    Value converted = getTypeConverter()->materializeTargetConversion(
-        rewriter, loc, stateType, next);
-    SignalWriteOp::create(rewriter, loc, state, converted);
+    Value next = nextConstant
+                     ? Value(hw::ConstantOp::create(rewriter, loc,
+                                                    *nextConstant))
+                     : adaptor.getNext();
+    Value enable = hw::ConstantOp::create(rewriter, loc, APInt(1, 1));
+    Value reset = hw::ConstantOp::create(rewriter, loc, APInt(1, 0));
+    Value resetValue = next;
+    if (reg.getReset()) {
+      reset = adaptor.getReset();
+      resetValue = resetConstant
+                       ? Value(hw::ConstantOp::create(rewriter, loc,
+                                                      *resetConstant))
+                       : adaptor.getResetValue();
+    }
+    if (!state || !next || !clockChannel || !enable || !reset || !resetValue)
+      return reg.emitOpError(
+          "failed to resolve all operands for SystemC firreg update");
+    RegisterWriteOp::create(rewriter, loc, state, next, clockChannel, enable,
+                            reset, resetValue,
+                            rewriter.getBoolAttr(reg.getIsAsync()));
     rewriter.replaceOp(reg, current);
     return success();
   }
@@ -1541,36 +1555,36 @@ std::unique_ptr<OperationPass<ModuleOp>> circt::createConvertHWToSystemCPass() {
   return std::make_unique<HWToSystemCPass>();
 }
 
+void circt::registerHWToSystemCPipeline() {
+  static PassPipelineRegistration<> behaviorPipeline(
+      "lower-hw-to-systemc",
+      "Flatten aggregate IO and values, then convert HW/Comb/Seq to SystemC",
+      [](OpPassManager &pm) {
+        pm.addPass(
+            hw::createFlattenIO(hw::FlattenIOOptions{true, true, true, '_'}));
+        pm.addNestedPass<hw::HWModuleOp>(hw::createHWAggregateToComb());
+        pm.addPass(hw::createHWConvertBitcasts());
+        pm.addNestedPass<hw::HWModuleOp>(hw::createHWAggregateToComb());
+        pm.addPass(hw::createHWConvertBitcasts());
+        pm.addPass(createConvertHWToSystemCPass());
+      });
+  static PassPipelineRegistration<> structurePipeline(
+      "lower-hw-to-systemc-structure",
+      "Flatten aggregate IO, then emit a SystemC hierarchy skeleton",
+      [](OpPassManager &pm) {
+        pm.addPass(
+            hw::createFlattenIO(hw::FlattenIOOptions{true, true, true, '_'}));
+        auto pass = std::make_unique<HWToSystemCPass>();
+        pass->structureOnly = true;
+        pass->preparedInput = true;
+        pm.addPass(std::move(pass));
+      });
+}
+
 /// This is the main entrypoint for the HW to SystemC conversion pass.
 void HWToSystemCPass::runOnOperation() {
   MLIRContext &context = getContext();
   ModuleOp module = getOperation();
-
-  if (!preparedInput) {
-    // Prepare the modules for the conversion. The conversion only supports
-    // scalar ports and combinational operations, so flatten aggregate ports,
-    // lower aggregate operations to comb ops, and convert the remaining
-    // bitcasts. Port names use '_' as the join character to keep the generated
-    // C++ identifiers valid.  A caller that needs to insert an interop
-    // instance between these stages can request --prepared-input and run the
-    // same preparation passes explicitly.
-    mlir::OpPassManager preparePM("builtin.module");
-    preparePM.addPass(
-        hw::createFlattenIO(hw::FlattenIOOptions{true, true, true, '_'}));
-    if (!structureOnly) {
-      auto &modulePM = preparePM.nestAny();
-      modulePM.addPass(hw::createHWAggregateToComb());
-      preparePM.addPass(hw::createHWConvertBitcasts());
-      // hw-convert-bitcasts may reintroduce aggregate ops, so lower them once
-      // more, then run bitcast conversion again. The second conversion is
-      // required for materializations introduced by aggregate lowering after
-      // the first bitcast pass.
-      preparePM.nestAny().addPass(hw::createHWAggregateToComb());
-      preparePM.addPass(hw::createHWConvertBitcasts());
-    }
-    if (failed(runPipeline(preparePM, module)))
-      return signalPassFailure();
-  }
 
   if (structureOnly) {
     TypeConverter typeConverter;
@@ -1609,7 +1623,14 @@ void HWToSystemCPass::runOnOperation() {
   populateTypeConversion(typeConverter);
   populateOpConversion(patterns, typeConverter);
 
-  if (failed(applyFullConversion(module, target, std::move(patterns)))) {
+  ConversionConfig conversionConfig;
+  // The module conversion deliberately cuts graph-region feedback through
+  // explicit SystemC signals. Applying those rewrites transactionally leaves
+  // cyclic users referring to delayed replacement placeholders and can turn a
+  // normal legalization failure into dangling operands during rollback.
+  conversionConfig.allowPatternRollback = false;
+  if (failed(applyFullConversion(module, target, std::move(patterns),
+                                 conversionConfig))) {
     signalPassFailure();
     return;
   }

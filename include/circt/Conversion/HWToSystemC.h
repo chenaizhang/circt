@@ -29,6 +29,9 @@ namespace circt {
 
 std::unique_ptr<mlir::OperationPass<mlir::ModuleOp>>
 createConvertHWToSystemCPass();
+
+/// Register the safe top-level preparation and HW-to-SystemC pipeline.
+void registerHWToSystemCPipeline();
 } // namespace circt
 
 #endif // CIRCT_CONVERSION_HWTOSYSTEMC_HWTOSYSTEMC_H_

@@ -368,6 +368,11 @@ static Value lowerProcess(llhd::ProcessOp process,
         process.emitOpError("unexpected predecessor structure");
         return {};
       }
+      // Passing the wait block argument back to itself is an explicit hold,
+      // not a data update.  Record it without a value so the register output
+      // becomes the default arm of the final next-state mux chain.
+      if (value == waitBlock->getArgument(argIdx))
+        value = {};
       paths.push_back({cond, value});
     }
     if (paths.empty()) {
@@ -401,13 +406,16 @@ static Value lowerProcess(llhd::ProcessOp process,
     }
     auto reg = builder.create<seq::CompRegOp>(loc, next, clock);
     if (hasHold) {
-      // Hold paths select the register output; create them after the
-      // register exists so the feedback is well-formed.
-      Value held = reg;
-      for (auto &[cond, value] : paths)
-        if (!value)
-          held = comb::MuxOp::create(builder, loc, cond, held, held);
-      reg.setOperand(0, held);
+      // Start with the current register value for every hold path, then apply
+      // the explicit updates under their path conditions.  The register must
+      // exist before this mux chain is built because its output is the hold
+      // value in the feedback graph.
+      Value selected = reg;
+      for (auto it = paths.rbegin(); it != paths.rend(); ++it)
+        if (it->second)
+          selected = comb::MuxOp::create(builder, loc, it->first, it->second,
+                                         selected);
+      reg.setOperand(0, selected);
     }
     registers.push_back(reg);
   }
@@ -446,9 +454,26 @@ static Value lowerProcess(llhd::ProcessOp process,
     }
     if (&block == dest) {
       // Dest block arguments carry the values observed by the wait.
-      for (auto [arg, value] :
-           llvm::zip(block.getArguments(), wait.getDestOperands()))
-        arg.replaceAllUsesWith(value);
+      for (auto indexed : llvm::enumerate(
+               llvm::zip(block.getArguments(), wait.getDestOperands()))) {
+        auto [arg, value] = indexed.value();
+        size_t index = indexed.index();
+        Value replacement = value;
+        // ImportVerilog passes an observed i1 both as a wait sensitivity and
+        // as a destination operand.  The block argument denotes its value
+        // before the wakeup, whereas the SSA value denotes its value after
+        // the wakeup.  Model that previous sample as the opposite level for
+        // this edge-triggered process.  Mapping both to the same SSA value
+        // turns `!previous & current` into `!current & current` and silently
+        // disables every sequential update.
+        if (index < wait.getObserved().size() &&
+            wait.getObserved()[index] == value && value.getType().isInteger(1)) {
+          builder.setInsertionPoint(process);
+          replacement = comb::XorOp::create(builder, loc, value,
+                                            constTrue(builder, loc), true);
+        }
+        arg.replaceAllUsesWith(replacement);
+      }
     }
   }
 

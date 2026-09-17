@@ -53,3 +53,34 @@ hw.module @conditional_comb(in %select : i1, in %a : i8, in %b : i8,
   // CHECK: hw.output
   hw.output %observed : i8
 }
+
+// A path that does not update state must feed back the current register value,
+// while the active path must retain its computed next value.
+// CHECK-LABEL: hw.module @hold_counter
+// CHECK: %[[REG:.+]] = seq.compreg %[[NEXT:.+]], %{{.+}} : i2
+// CHECK: %[[INC:.+]] = comb.add %[[REG]], {{.+}} : i2
+// CHECK: %[[NEXT]] = comb.mux {{.+}}, %[[INC]], %[[REG]] : i2
+// CHECK: hw.output %[[REG]] : i2
+hw.module @hold_counter(in %clk : i1, in %enable : i1, out count : i2) {
+  %zero = hw.constant 0 : i2
+  %one = hw.constant 1 : i2
+  %true = hw.constant true
+  %time = llhd.constant_time <0ns, 1d, 0e>
+  %signal = llhd.sig %zero : i2
+  %0:1 = llhd.process -> i2 {
+    cf.br ^bb1(%zero : i2)
+  ^bb1(%state : i2):
+    llhd.wait yield (%state : i2), (%clk : i1), ^bb2(%clk : i1)
+  ^bb2(%previousClock : i1):
+    %notPrevious = comb.xor %previousClock, %true : i1
+    %edge = comb.and %notPrevious, %clk : i1
+    %update = comb.and %edge, %enable : i1
+    cf.cond_br %update, ^bb3, ^bb1(%state : i2)
+  ^bb3:
+    %incremented = comb.add %state, %one : i2
+    cf.br ^bb1(%incremented : i2)
+  }
+  llhd.drv %signal, %0 after %time : i2
+  %observed = llhd.prb %signal : i2
+  hw.output %observed : i2
+}

@@ -90,6 +90,7 @@ inline void registerAllPasses() {
   synth::registerPasses();
 
   // Register pass pipelines
+  registerHWToSystemCPipeline();
   rtg::registerPipelines();
 }
 

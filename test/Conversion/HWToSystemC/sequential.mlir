@@ -1,4 +1,5 @@
 // RUN: circt-opt --convert-hw-to-systemc %s | FileCheck %s
+// RUN: circt-opt --convert-hw-to-systemc %s | circt-translate --export-systemc > /dev/null
 
 hw.module @counter(in %clk: i1, in %reset: i1, in %enable: i1,
                    in %next: i8, out value: i8) {
@@ -13,11 +14,25 @@ hw.module @counter(in %clk: i1, in %reset: i1, in %enable: i1,
 // CHECK: %value_state = systemc.signal : !systemc.signal<!systemc.uint<8>>
 // CHECK: systemc.sensitive {{.*}}%value_state
 // CHECK: %[[STATE:.*]] = systemc.signal.read %value_state
-// CHECK: %[[ENABLE:.*]] = comb.mux {{.*}}, {{.*}}, {{.*}} : i8
-// CHECK: %[[RESET:.*]] = comb.mux {{.*}}, {{.*}}, %[[ENABLE]] : i8
-// CHECK: %[[EDGE:.*]] = systemc.signal.posedge %clk : !systemc.in<i1>
-// CHECK: %[[NEXT:.*]] = comb.mux %[[EDGE]], %[[RESET]], {{.*}} : i8
-// CHECK: systemc.signal.write %value_state
+// CHECK: "systemc.register.write"(%value_state, {{.*}}, %clk, {{.*}}, {{.*}}, {{.*}}) <{isAsync = false}>
+// CHECK-NOT: seq.
+
+// -----
+
+// Wide memory data must be converted before reaching ExportSystemC. Keeping
+// the read result as builtin i192 would leave the exporter without a C++ type.
+hw.module @wide_memory(in %clk: i1, in %address: i5,
+                       out readData: i192) {
+  %clock = seq.to_clock %clk
+  %storage = seq.firmem 0, 1, undefined, undefined : <32 x 192>
+  %readData = seq.firmem.read_port %storage[%address], clock %clock
+      : <32 x 192>
+  hw.output %readData : i192
+}
+
+// CHECK-LABEL: systemc.module @wide_memory
+// CHECK: systemc.memory.read {{.*}} -> !systemc.biguint<192>
+// CHECK: systemc.convert {{.*}} : (!systemc.biguint<192>) -> i192
 // CHECK-NOT: seq.
 
 // -----
@@ -54,10 +69,7 @@ hw.module @async_register(in %clk: i1, in %reset: i1, in %next: i8,
 
 // CHECK-LABEL: systemc.module @async_register
 // CHECK: %[[STATE_SIGNAL:.*]] = systemc.signal : !systemc.signal<!systemc.uint<8>>
-// CHECK: %[[EDGE:.*]] = systemc.signal.posedge %clk : !systemc.in<i1>
-// CHECK: %[[CLOCKED:.*]] = comb.mux %[[EDGE]], {{.*}}, {{.*}} : i8
-// CHECK: %[[ASYNC:.*]] = comb.mux {{.*}}, {{.*}}, %[[CLOCKED]] : i8
-// CHECK: systemc.signal.write %[[STATE_SIGNAL]]
+// CHECK: "systemc.register.write"(%[[STATE_SIGNAL]], {{.*}}, %clk, %true, {{.*}}, {{.*}}) <{isAsync = true}>
 // CHECK-NOT: seq.
 
 // -----
@@ -73,10 +85,7 @@ hw.module @constant_register(in %clk: i1, out value: i8) {
 }
 
 // CHECK-LABEL: systemc.module @constant_register
-// CHECK: %[[EDGE:.*]] = systemc.signal.posedge %clk : !systemc.in<i1>
-// CHECK: %[[NEXT:.*]] = comb.mux %[[EDGE]], %{{.*}}, %{{.*}} : i8
-// CHECK: %[[CONVERTED:.*]] = systemc.convert %[[NEXT]] : (i8) -> !systemc.uint<8>
-// CHECK: systemc.signal.write %{{.*}}, %[[CONVERTED]]
+// CHECK: "systemc.register.write"(%{{.*}}, %{{.*}}, %clk, %true, %false, %{{.*}}) <{isAsync = false}>
 // CHECK-NOT: seq.
 
 // -----
@@ -98,8 +107,6 @@ hw.module @feedback_counter(in %clk: i1, in %reset: i1, out value: i8) {
 // CHECK: %[[STATE_READ:.*]] = systemc.signal.read %[[STATE_SIGNAL]]
 // CHECK: %[[CURRENT:.*]] = systemc.convert %[[STATE_READ]] : (!systemc.uint<8>) -> i8
 // CHECK: %[[NEXT:.*]] = comb.add {{.*}}, {{.*}} : i8
-// CHECK: %[[RESET_NEXT:.*]] = comb.mux {{.*}}, {{.*}}, %[[NEXT]] : i8
-// CHECK: %[[EDGE:.*]] = systemc.signal.posedge %clk : !systemc.in<i1>
-// CHECK: comb.mux %[[EDGE]], %[[RESET_NEXT]], %[[CURRENT]] : i8
-// CHECK: systemc.signal.write %[[STATE_SIGNAL]]
+// CHECK: %[[NEXT_SC:.*]] = systemc.convert %[[NEXT]] : (i8) -> !systemc.uint<8>
+// CHECK: "systemc.register.write"(%[[STATE_SIGNAL]], %[[NEXT_SC]], %clk, %true, {{.*}}, {{.*}}) <{isAsync = false}>
 // CHECK-NOT: seq.

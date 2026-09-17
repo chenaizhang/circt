@@ -13,6 +13,7 @@
 #include "SystemCEmissionPatterns.h"
 #include "../EmissionPrinter.h"
 #include "circt/Dialect/SystemC/SystemCOps.h"
+#include "llvm/ADT/DenseMap.h"
 
 using namespace circt;
 using namespace circt::systemc;
@@ -112,6 +113,54 @@ struct SignalWriteEmitter : OpEmissionPattern<SignalWriteOp> {
     p << ".write(";
     p.getInlinable(op.getSrc()).emit();
     p << ");\n";
+  }
+};
+
+/// Emit a register update with explicit edge, enable, and reset semantics.
+struct RegisterWriteEmitter : OpEmissionPattern<RegisterWriteOp> {
+  using OpEmissionPattern::OpEmissionPattern;
+
+  void emitStatement(RegisterWriteOp op, EmissionPrinter &p) override {
+    auto emitWrite = [&](Value value) {
+      p.getInlinable(op.getDest()).emit();
+      p << ".write(";
+      p.getInlinable(value).emit();
+      p << ");\n";
+    };
+
+    if (op.getIsAsync()) {
+      p << "if ((";
+      p.getInlinable(op.getReset()).emit();
+      p << ") != 0) {\n";
+      p.getOstream().indent();
+      emitWrite(op.getResetValue());
+      p.getOstream().unindent();
+      p << "} else if (";
+    } else {
+      p << "if (";
+    }
+
+    p.getInlinable(op.getClock()).emit();
+    p << ".posedge()) {\n";
+    p.getOstream().indent();
+    if (!op.getIsAsync()) {
+      p << "if ((";
+      p.getInlinable(op.getReset()).emit();
+      p << ") != 0) {\n";
+      p.getOstream().indent();
+      emitWrite(op.getResetValue());
+      p.getOstream().unindent();
+      p << "} else ";
+    }
+    p << "if ((";
+    p.getInlinable(op.getEnable()).emit();
+    p << ") != 0) {\n";
+    p.getOstream().indent();
+    emitWrite(op.getSrc());
+    p.getOstream().unindent();
+    p << "}\n";
+    p.getOstream().unindent();
+    p << "}\n";
   }
 };
 
@@ -338,23 +387,46 @@ struct MemoryEmitter : OpEmissionPattern<MemoryOp> {
   }
 };
 
-/// Emit an array element read as an inline C++ expression.
+/// Snapshot an array element read into a local C++ value.  Keeping the read as
+/// a statement preserves IR ordering relative to a following memory write,
+/// which is required for RTL nonblocking read-before-write semantics.
 struct MemoryReadEmitter : OpEmissionPattern<MemoryReadOp> {
   using OpEmissionPattern::OpEmissionPattern;
 
+  bool matchStatement(Operation *op) override {
+    return isa<MemoryReadOp>(op);
+  }
+
   MatchResult matchInlinable(Value value) override {
     if (value.getDefiningOp<MemoryReadOp>())
-      return Precedence::MEMBER_ACCESS;
+      return Precedence::VAR;
     return {};
   }
 
   void emitInlined(Value value, EmissionPrinter &p) override {
     auto op = value.getDefiningOp<MemoryReadOp>();
+    p << "systemc_memory_read_" << getId(op);
+  }
+
+  void emitStatement(MemoryReadOp op, EmissionPrinter &p) override {
+    p.emitType(op.getData().getType());
+    p << " systemc_memory_read_" << getId(op) << " = ";
     p.getInlinable(op.getMemory()).emit();
     p << "[";
     p.getInlinable(op.getAddress()).emit();
-    p << "]";
+    p << "];\n";
   }
+
+private:
+  unsigned getId(Operation *op) {
+    auto [it, inserted] = ids.try_emplace(op, nextId);
+    if (inserted)
+      ++nextId;
+    return it->second;
+  }
+
+  llvm::DenseMap<Operation *, unsigned> ids;
+  unsigned nextId = 0;
 };
 
 /// Emit a clock/enable guarded array element write.
@@ -733,7 +805,8 @@ void circt::ExportSystemC::populateSystemCOpEmitters(
   patterns.add<SCModuleEmitter, CtorEmitter, SCFuncEmitter, MethodEmitter,
                ThreadEmitter, WaitTimeEmitter, ConvertEmitter,
                // Signal and port related emitters
-               SignalWriteEmitter, SignalReadEmitter, SignalPosedgeEmitter,
+               SignalWriteEmitter, RegisterWriteEmitter, SignalReadEmitter,
+               SignalPosedgeEmitter,
                SignalEmitter, SensitiveEmitter, MemoryEmitter,
                MemoryReadEmitter, MemoryWriteEmitter,
                // Instance-related emitters

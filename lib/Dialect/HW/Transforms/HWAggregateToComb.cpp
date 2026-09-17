@@ -449,18 +449,22 @@ struct AggregateRegisterConversion : OpConversionPattern<RegTy> {
             rewriter.getStringAttr(""));
       } else {
         // seq::FirRegOp
-        Value resetValue;
-        if (reg.getReset())
-          resetValue = getChild(adaptor.getResetValue(), offset, width);
         StringAttr name =
             reg.getNameAttr() ? rewriter.getStringAttr(
                                     reg.getNameAttr().getValue() + "_" +
                                     suffix)
                               : rewriter.getStringAttr("");
-        scalarReg = rewriter.create<seq::FirRegOp>(
-            loc, next, adaptor.getClk(), name, adaptor.getReset(),
-            resetValue, hw::InnerSymAttr(), reg.getIsAsync(),
-            Attribute());
+        if (reg.getReset()) {
+          Value resetValue =
+              getChild(adaptor.getResetValue(), offset, width);
+          scalarReg = rewriter.create<seq::FirRegOp>(
+              loc, next, adaptor.getClk(), name, adaptor.getReset(),
+              resetValue, hw::InnerSymAttr(), reg.getIsAsync(), Attribute());
+        } else {
+          scalarReg = rewriter.create<seq::FirRegOp>(
+              loc, next, adaptor.getClk(), name, hw::InnerSymAttr(),
+              Attribute());
+        }
       }
       children.push_back(scalarReg);
       suffixes.push_back(suffix);
