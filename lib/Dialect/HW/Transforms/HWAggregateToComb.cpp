@@ -563,7 +563,14 @@ void HWAggregateToCombPass::runOnOperation() {
   AggregateTypeConverter typeConverter;
   populateHWAggregateToCombOpConversionPatterns(patterns, typeConverter);
 
+  ConversionConfig conversionConfig;
+  // Aggregate registers commonly participate in feedback loops. Commit each
+  // scalarizing rewrite immediately so cyclic users can observe the rebuilt
+  // value instead of leaving the conversion driver with an unresolved SCC of
+  // delayed replacement placeholders.
+  conversionConfig.allowPatternRollback = false;
   if (failed(mlir::applyPartialConversion(getOperation(), target,
-                                          std::move(patterns))))
+                                          std::move(patterns),
+                                          conversionConfig)))
     return signalPassFailure();
 }

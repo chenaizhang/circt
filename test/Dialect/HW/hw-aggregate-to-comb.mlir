@@ -214,3 +214,14 @@ hw.module @aggregate_reg_without_reset(in %clk : !seq.clock, in %next : !hw.arra
   %e = hw.array_get %r[%c0_i1] : !hw.array<2xi8>, i1
   hw.output %e : i8
 }
+
+// CHECK-LABEL: @aggregate_feedback
+hw.module @aggregate_feedback(in %clk : !seq.clock, in %enable : i1,
+                              out value : !hw.array<4xi8>) {
+  // CHECK: seq.compreg {{.*}} : i8
+  // CHECK: comb.concat
+  // CHECK-NOT: seq.compreg {{.*}} : !hw.array<4xi8>
+  %next = comb.mux %enable, %state, %state : !hw.array<4xi8>
+  %state = seq.compreg %next, %clk : !hw.array<4xi8>
+  hw.output %state : !hw.array<4xi8>
+}
