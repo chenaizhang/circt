@@ -93,27 +93,27 @@ hw.module @instanceLowering (in %port0: i32, out out0: i16, out out1: i32, out o
 // CHECK-NEXT:      [[V0:%.+]] = systemc.signal.read %port0 : !systemc.in<!systemc.uint<32>>
 // CHECK-NEXT:      [[V1:%.+]] = systemc.convert [[V0]] : (!systemc.uint<32>) -> i32
 // CHECK-NEXT:      [[V2:%.+]] = systemc.convert [[V1]] : (i32) -> !systemc.uint<32>
+// CHECK-NEXT:      [[V3:%.+]] = systemc.signal.read %inst2_out2_state : !systemc.signal<!systemc.uint<64>>
+// CHECK-NEXT:      [[V4:%.+]] = systemc.convert [[V3]] : (!systemc.uint<64>) -> i64
+// CHECK-NEXT:      [[V5:%.+]] = systemc.signal.read %inst2_out1_state : !systemc.signal<!systemc.uint<32>>
+// CHECK-NEXT:      [[V6:%.+]] = systemc.convert [[V5]] : (!systemc.uint<32>) -> i32
+// CHECK-NEXT:      [[V7:%.+]] = systemc.signal.read %inst2_out0_state : !systemc.signal<!systemc.uint<16>>
+// CHECK-NEXT:      [[V8:%.+]] = systemc.convert [[V7]] : (!systemc.uint<16>) -> i16
+// CHECK-NEXT:      [[V9:%.+]] = systemc.signal.read %inst1_out2_state : !systemc.signal<!systemc.uint<64>>
+// CHECK-NEXT:      [[V10:%.+]] = systemc.convert [[V9]] : (!systemc.uint<64>) -> i64
+// CHECK-NEXT:      [[V11:%.+]] = systemc.signal.read %inst1_out1_state : !systemc.signal<!systemc.uint<32>>
+// CHECK-NEXT:      [[V12:%.+]] = systemc.convert [[V11]] : (!systemc.uint<32>) -> i32
+// CHECK-NEXT:      [[V13:%.+]] = systemc.signal.read %inst1_out0_state : !systemc.signal<!systemc.uint<16>>
+// CHECK-NEXT:      [[V14:%.+]] = systemc.convert [[V13]] : (!systemc.uint<16>) -> i16
 // CHECK-NEXT:      %c0_i16 = hw.constant 0 : i16
-// CHECK-NEXT:      [[V3:%.+]] = systemc.convert %c0_i16 : (i16) -> !systemc.uint<16>
-// CHECK-NEXT:      systemc.signal.write %inst1_in0, [[V3]] : !systemc.signal<!systemc.uint<16>>
+// CHECK-NEXT:      [[V15:%.+]] = systemc.convert %c0_i16 : (i16) -> !systemc.uint<16>
+// CHECK-NEXT:      systemc.signal.write %inst1_in0, [[V15]] : !systemc.signal<!systemc.uint<16>>
 // CHECK-NEXT:      systemc.signal.write %inst1_in1, [[V2]] : !systemc.signal<!systemc.uint<32>>
-// CHECK:           [[V4:%.+]] = systemc.signal.read %inst1_out0_state : !systemc.signal<!systemc.uint<16>>
-// CHECK-NEXT:      [[V5:%.+]] = systemc.convert [[V4]] : (!systemc.uint<16>) -> i16
-// CHECK:           [[V6:%.+]] = systemc.signal.read %inst1_out1_state : !systemc.signal<!systemc.uint<32>>
-// CHECK-NEXT:      [[V7:%.+]] = systemc.convert [[V6]] : (!systemc.uint<32>) -> i32
-// CHECK:           [[V8:%.+]] = systemc.signal.read %inst1_out2_state : !systemc.signal<!systemc.uint<64>>
-// CHECK-NEXT:      [[V9:%.+]] = systemc.convert [[V8]] : (!systemc.uint<64>) -> i64
-// CHECK:           [[V10:%.+]] = systemc.signal.read %inst2_out0_state : !systemc.signal<!systemc.uint<16>>
-// CHECK-NEXT:      [[V11:%.+]] = systemc.convert [[V10]] : (!systemc.uint<16>) -> i16
-// CHECK:           [[V12:%.+]] = systemc.signal.read %inst2_out1_state : !systemc.signal<!systemc.uint<32>>
-// CHECK-NEXT:      [[V13:%.+]] = systemc.convert [[V12]] : (!systemc.uint<32>) -> i32
-// CHECK:           [[V14:%.+]] = systemc.signal.read %inst2_out2_state : !systemc.signal<!systemc.uint<64>>
-// CHECK-NEXT:      [[V15:%.+]] = systemc.convert [[V14]] : (!systemc.uint<64>) -> i64
-// CHECK-NEXT:      [[V16:%.+]] = systemc.convert [[V11]] : (i16) -> !systemc.uint<16>
+// CHECK-NEXT:      [[V16:%.+]] = systemc.convert [[V8]] : (i16) -> !systemc.uint<16>
 // CHECK-NEXT:      systemc.signal.write %out0, [[V16]] : !systemc.out<!systemc.uint<16>>
-// CHECK-NEXT:      [[V17:%.+]] = systemc.convert [[V13]] : (i32) -> !systemc.uint<32>
+// CHECK-NEXT:      [[V17:%.+]] = systemc.convert [[V6]] : (i32) -> !systemc.uint<32>
 // CHECK-NEXT:      systemc.signal.write %out1, [[V17]] : !systemc.out<!systemc.uint<32>>
-// CHECK-NEXT:      [[V18:%.+]] = systemc.convert [[V9]] : (i64) -> !systemc.uint<64>
+// CHECK-NEXT:      [[V18:%.+]] = systemc.convert [[V10]] : (i64) -> !systemc.uint<64>
 // CHECK-NEXT:      systemc.signal.write %out2, [[V18]] : !systemc.out<!systemc.uint<64>>
 // CHECK-NEXT:    }
 // CHECK-NEXT:  }
