@@ -73,13 +73,18 @@ jobs:
         run: |
           build/bin/llvm-lit -sv \
             test/Dialect/HW/extract-hierarchy-slice.mlir \
+            test/Dialect/HW/hw-aggregate-to-comb.mlir \
             test/Conversion/HWToSystemC \
+            test/Dialect/LLHD/Transforms/lower-timed-processes.mlir \
+            test/Dialect/Seq/reg-of-vec-to-mem.mlir \
             test/Dialect/SystemC \
             test/Target/ExportSystemC
           CIRCT_BUILD_DIR="$PWD/build" \
             bash test/Target/ExportSystemC/verilated-mixed/run.sh
           CIRCT_BUILD_DIR="$PWD/build" \
             bash test/Target/ExportSystemC/memory-runtime/run.sh
+          CIRCT_BUILD_DIR="$PWD/build" \
+            bash test/Target/ExportSystemC/register-runtime/run.sh
           CIRCT_BUILD_DIR="$PWD/build" \
             bash test/Target/ExportSystemC/thread-runtime/run.sh
 
