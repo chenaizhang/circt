@@ -271,7 +271,26 @@ struct SCFuncEmitter : OpEmissionPattern<SCFuncOp> {
     // Emit a new line before the member function to ensure an empty line for
     // better readability.
     p << "\nvoid " << op.getName() << "() ";
-    p.emitRegion(op.getBody());
+    auto scope = p.getOstream().scope("{\n", "}\n");
+
+    // A zero-latency read must observe a write performed on the current clock
+    // edge. A C++ array does not produce a SystemC event when it changes, so a
+    // second SC_METHOD activation cannot model that update. Emit writes to an
+    // asynchronous-read memory before its reads in the same activation. Keep
+    // the original order for one-cycle reads, which use explicit state.
+    auto isAsyncMemoryWrite = [](Operation &bodyOp) {
+      auto write = dyn_cast<MemoryWriteOp>(bodyOp);
+      if (!write)
+        return false;
+      auto memory = write.getMemory().getDefiningOp<MemoryOp>();
+      return memory && memory.getReadLatency() == 0;
+    };
+    for (Operation &bodyOp : op.getBodyBlock()->getOperations())
+      if (isAsyncMemoryWrite(bodyOp))
+        p.emitOp(&bodyOp);
+    for (Operation &bodyOp : op.getBodyBlock()->getOperations())
+      if (!isAsyncMemoryWrite(bodyOp))
+        p.emitOp(&bodyOp);
   }
 };
 
