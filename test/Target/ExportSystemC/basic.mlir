@@ -64,6 +64,10 @@ systemc.module @basic (%port0: !systemc.in<i1>, %port1: !systemc.inout<!systemc.
     // CHECK-NEXT: port4.write(false);
     %3 = hw.constant 0 : i1
     systemc.signal.write %port4, %3 : !systemc.out<i1>
+    // CHECK-NEXT: port3.write(sc_bv<1024>(18446744073709551615ULL));
+    %cmax_i192 = hw.constant 18446744073709551615 : i192
+    %wide = systemc.convert %cmax_i192 : (i192) -> !systemc.bv<1024>
+    systemc.signal.write %port3, %wide : !systemc.out<!systemc.bv<1024>>
     // CHECK-NEXT: testvar = 42;
     systemc.cpp.assign %testvar = %c42_i32 : i32
     // CHECK-NEXT: testvarwithinit = testvar;

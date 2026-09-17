@@ -151,6 +151,13 @@ struct IntegerAttrEmitter : AttrEmissionPattern<IntegerAttr> {
       SmallString<128> strValue;
       val.toString(strValue, 10, isSigned);
       p << strValue;
+      // An unsuffixed decimal literal equal to UINT64_MAX is commonly typed
+      // as a compiler-specific 128-bit integer. SystemC's sc_biguint
+      // constructors then become ambiguous. Keep values that fit in uint64_t
+      // in the standard unsigned-long-long domain, even when the MLIR integer
+      // type itself is wider than 64 bits.
+      if (!isSigned && val.getActiveBits() == 64)
+        p << "ULL";
     }
   }
 };
