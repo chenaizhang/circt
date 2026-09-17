@@ -25,9 +25,9 @@ systemc.module @edge_detector(%clk: !systemc.in<i1>,
 // CHECK-LABEL: SC_MODULE(memory)
 // CHECK: std::array<sc_uint<8>, 16> storage{};
 // CHECK: SC_METHOD(innerLogic);
-// CHECK: uint8_t systemc_memory_read_{{[0-9]+}} = storage[sc_uint<4>(address.read())];
 // CHECK: if ((sc_uint<1>(clk.posedge() & writeEnable.read())) != 0)
 // CHECK-SAME: storage[sc_uint<4>(address.read())] = sc_uint<8>(writeData.read());
+// CHECK: uint8_t systemc_memory_read_{{[0-9]+}} = storage[sc_uint<4>(address.read())];
 // CHECK: readData.write(sc_uint<8>(systemc_memory_read_{{[0-9]+}}));
 systemc.module @memory(%clk: !systemc.in<i1>,
                        %writeEnable: !systemc.in<i1>,
