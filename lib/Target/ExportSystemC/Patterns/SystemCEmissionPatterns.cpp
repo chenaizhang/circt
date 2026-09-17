@@ -271,7 +271,18 @@ struct SCFuncEmitter : OpEmissionPattern<SCFuncOp> {
     // Emit a new line before the member function to ensure an empty line for
     // better readability.
     p << "\nvoid " << op.getName() << "() ";
-    p.emitRegion(op.getBody());
+    auto scope = p.getOstream().scope("{\n", "}\n");
+
+    // A clocked memory write updates storage immediately in C++, whereas RTL
+    // nonblocking semantics require reads in the same process activation to
+    // observe the pre-edge value.  Snapshot every memory read before emitting
+    // the ordered body, then omit those reads from the second traversal.
+    for (Operation &bodyOp : op.getBodyBlock()->getOperations())
+      if (isa<MemoryReadOp>(bodyOp))
+        p.emitOp(&bodyOp);
+    for (Operation &bodyOp : op.getBodyBlock()->getOperations())
+      if (!isa<MemoryReadOp>(bodyOp))
+        p.emitOp(&bodyOp);
   }
 };
 

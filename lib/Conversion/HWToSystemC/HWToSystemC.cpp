@@ -1546,6 +1546,11 @@ static void populateTypeConversion(TypeConverter &converter) {
 namespace {
 struct HWToSystemCPass
     : public circt::impl::ConvertHWToSystemCBase<HWToSystemCPass> {
+  void configureStructureOnly() {
+    structureOnly = true;
+    preparedInput = true;
+  }
+
   void runOnOperation() override;
 };
 } // namespace
@@ -1575,8 +1580,7 @@ void circt::registerHWToSystemCPipeline() {
         pm.addPass(
             hw::createFlattenIO(hw::FlattenIOOptions{true, true, true, '_'}));
         auto pass = std::make_unique<HWToSystemCPass>();
-        pass->structureOnly = true;
-        pass->preparedInput = true;
+        pass->configureStructureOnly();
         pm.addPass(std::move(pass));
       });
 }

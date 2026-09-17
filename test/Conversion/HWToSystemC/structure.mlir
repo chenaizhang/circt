@@ -65,16 +65,16 @@ hw.module @submodule (in %in0: i16, in %in1: i32, out out0: i16, out out1: i32, 
 
 // CHECK-LABEL:  systemc.module @instanceLowering (%port0: !systemc.in<!systemc.uint<32>>, %out0: !systemc.out<!systemc.uint<16>>, %out1: !systemc.out<!systemc.uint<32>>, %out2: !systemc.out<!systemc.uint<64>>) {
 hw.module @instanceLowering (in %port0: i32, out out0: i16, out out1: i32, out out2: i64) {
+// CHECK-NEXT:    %inst1_out0_state = systemc.signal  : !systemc.signal<!systemc.uint<16>>
+// CHECK-NEXT:    %inst1_out1_state = systemc.signal  : !systemc.signal<!systemc.uint<32>>
+// CHECK-NEXT:    %inst1_out2_state = systemc.signal  : !systemc.signal<!systemc.uint<64>>
+// CHECK-NEXT:    %inst2_out0_state = systemc.signal  : !systemc.signal<!systemc.uint<16>>
+// CHECK-NEXT:    %inst2_out1_state = systemc.signal  : !systemc.signal<!systemc.uint<32>>
+// CHECK-NEXT:    %inst2_out2_state = systemc.signal  : !systemc.signal<!systemc.uint<64>>
 // CHECK-NEXT:    %inst1 = systemc.instance.decl  @submodule : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>
 // CHECK-NEXT:    %inst1_in0 = systemc.signal  : !systemc.signal<!systemc.uint<16>>
 // CHECK-NEXT:    %inst1_in1 = systemc.signal  : !systemc.signal<!systemc.uint<32>>
-// CHECK-NEXT:    %inst1_out0 = systemc.signal  : !systemc.signal<!systemc.uint<16>>
-// CHECK-NEXT:    %inst1_out1 = systemc.signal  : !systemc.signal<!systemc.uint<32>>
-// CHECK-NEXT:    %inst1_out2 = systemc.signal  : !systemc.signal<!systemc.uint<64>>
 // CHECK-NEXT:    %inst2 = systemc.instance.decl  @submodule : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>
-// CHECK-NEXT:    %inst2_out0 = systemc.signal  : !systemc.signal<!systemc.uint<16>>
-// CHECK-NEXT:    %inst2_out1 = systemc.signal  : !systemc.signal<!systemc.uint<32>>
-// CHECK-NEXT:    %inst2_out2 = systemc.signal  : !systemc.signal<!systemc.uint<64>>
 // CHECK-NEXT:    systemc.ctor {
 // CHECK-NEXT:      systemc.method [[UPDATEFUNC:%.+]]
 // CHECK-NEXT:      systemc.sensitive %port0 : !systemc.in<!systemc.uint<32>>
