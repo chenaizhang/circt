@@ -34,7 +34,7 @@ systemc.module @memory(%clk: !systemc.in<i1>,
                        %address: !systemc.in<!systemc.uint<4>>,
                        %writeData: !systemc.in<!systemc.uint<8>>,
                        %readData: !systemc.out<!systemc.uint<8>>) {
-  %storage = systemc.memory "storage" [16 x 8] latency 0, 1 : !emitc.opaque<"std::array<sc_uint<8>, 16>">
+  %storage = systemc.memory "storage" [16 x 8] latency 0, 1 ruw 2 : !emitc.opaque<"std::array<sc_uint<8>, 16>">
   systemc.ctor {
     systemc.method %innerLogic
     systemc.sensitive %clk, %writeEnable, %address, %writeData : !systemc.in<i1>, !systemc.in<i1>, !systemc.in<!systemc.uint<4>>, !systemc.in<!systemc.uint<8>>

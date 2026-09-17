@@ -24,7 +24,13 @@ int sc_main(int argc, char **argv) {
   writeEnable.write(true);
   sc_start(10, SC_NS);
   writeEnable.write(false);
-  sc_start(SC_ZERO_TIME);
+  // The source memory declares read-under-write as undefined. Avoid relying
+  // on a particular collision result and retrigger the asynchronous read after
+  // the write has committed.
+  address.write(4);
+  sc_start(1, SC_NS);
+  address.write(3);
+  sc_start(1, SC_NS);
 
   if (readData.read() != 0x5a) {
     std::cerr << "memory readback failed: " << readData.read() << "\n";

@@ -1065,6 +1065,9 @@ static MemoryOp createMemory(ConversionPatternRewriter &rewriter,
                      rewriter.getI64IntegerAttr(memory.getType().getWidth()));
   state.addAttribute("readLatency", memory.getReadLatencyAttr());
   state.addAttribute("writeLatency", memory.getWriteLatencyAttr());
+  state.addAttribute("readUnderWrite",
+                     rewriter.getI32IntegerAttr(static_cast<int32_t>(
+                         memory.getRuw())));
   return cast<MemoryOp>(rewriter.create(state));
 }
 

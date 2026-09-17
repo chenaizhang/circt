@@ -273,23 +273,23 @@ struct SCFuncEmitter : OpEmissionPattern<SCFuncOp> {
     p << "\nvoid " << op.getName() << "() ";
     auto scope = p.getOstream().scope("{\n", "}\n");
 
-    // A zero-latency read must observe a write performed on the current clock
-    // edge. A C++ array does not produce a SystemC event when it changes, so a
-    // second SC_METHOD activation cannot model that update. Emit writes to an
-    // asynchronous-read memory before its reads in the same activation. Keep
-    // the original order for one-cycle reads, which use explicit state.
-    auto isAsyncMemoryWrite = [](Operation &bodyOp) {
+    // A `new` zero-latency read-under-write policy must observe a write on the
+    // current clock edge. A C++ array does not produce a SystemC event when it
+    // changes, so emit those writes before their reads in the same activation.
+    // `old`, `undefined`, and one-cycle reads retain the lowering's IR order.
+    auto isWriteFirstMemoryWrite = [](Operation &bodyOp) {
       auto write = dyn_cast<MemoryWriteOp>(bodyOp);
       if (!write)
         return false;
       auto memory = write.getMemory().getDefiningOp<MemoryOp>();
-      return memory && memory.getReadLatency() == 0;
+      return memory && memory.getReadLatency() == 0 &&
+             memory.getReadUnderWrite() == 2;
     };
     for (Operation &bodyOp : op.getBodyBlock()->getOperations())
-      if (isAsyncMemoryWrite(bodyOp))
+      if (isWriteFirstMemoryWrite(bodyOp))
         p.emitOp(&bodyOp);
     for (Operation &bodyOp : op.getBodyBlock()->getOperations())
-      if (!isAsyncMemoryWrite(bodyOp))
+      if (!isWriteFirstMemoryWrite(bodyOp))
         p.emitOp(&bodyOp);
   }
 };

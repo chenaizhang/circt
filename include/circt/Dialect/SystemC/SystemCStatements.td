@@ -86,11 +86,13 @@ def MemoryOp : SystemCOp<"memory", [
   }];
 
   let arguments = (ins StrAttr:$name, I64Attr:$depth, I64Attr:$width,
-                       I32Attr:$readLatency, I32Attr:$writeLatency);
+                       I32Attr:$readLatency, I32Attr:$writeLatency,
+                       I32Attr:$readUnderWrite);
   let results = (outs AnyType:$memory);
   let assemblyFormat = [{
     $name `[` $depth `x` $width `]`
-    `latency` $readLatency `,` $writeLatency attr-dict `:` type($memory)
+    `latency` $readLatency `,` $writeLatency `ruw` $readUnderWrite
+      attr-dict `:` type($memory)
   }];
 }
 
