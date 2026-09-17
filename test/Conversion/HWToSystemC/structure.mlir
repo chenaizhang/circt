@@ -77,17 +77,17 @@ hw.module @instanceLowering (in %port0: i32, out out0: i16, out out1: i32, out o
 // CHECK-NEXT:    %inst2 = systemc.instance.decl  @submodule : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>
 // CHECK-NEXT:    systemc.ctor {
 // CHECK-NEXT:      systemc.method [[UPDATEFUNC:%.+]]
-// CHECK-NEXT:      systemc.sensitive %port0 : !systemc.in<!systemc.uint<32>>
+// CHECK-NEXT:      systemc.sensitive %port0{{.*}}
 // CHECK-NEXT:      systemc.instance.bind_port %inst1["in0"] to %inst1_in0 : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>, !systemc.signal<!systemc.uint<16>>
 // CHECK-NEXT:      systemc.instance.bind_port %inst1["in1"] to %inst1_in1 : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>, !systemc.signal<!systemc.uint<32>>
-// CHECK-NEXT:      systemc.instance.bind_port %inst1["out0"] to %inst1_out0 : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>, !systemc.signal<!systemc.uint<16>>
-// CHECK-NEXT:      systemc.instance.bind_port %inst1["out1"] to %inst1_out1 : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>, !systemc.signal<!systemc.uint<32>>
-// CHECK-NEXT:      systemc.instance.bind_port %inst1["out2"] to %inst1_out2 : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>, !systemc.signal<!systemc.uint<64>>
-// CHECK-NEXT:      systemc.instance.bind_port %inst2["in0"] to %inst1_out0 : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>, !systemc.signal<!systemc.uint<16>>
-// CHECK-NEXT:      systemc.instance.bind_port %inst2["in1"] to %inst1_out1 : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>, !systemc.signal<!systemc.uint<32>>
-// CHECK-NEXT:      systemc.instance.bind_port %inst2["out0"] to %inst2_out0 : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>, !systemc.signal<!systemc.uint<16>>
-// CHECK-NEXT:      systemc.instance.bind_port %inst2["out1"] to %inst2_out1 : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>, !systemc.signal<!systemc.uint<32>>
-// CHECK-NEXT:      systemc.instance.bind_port %inst2["out2"] to %inst2_out2 : !systemc.module<submodule(in0: !systemc.in<!systemc.uint<16>>, in1: !systemc.in<!systemc.uint<32>>, out0: !systemc.out<!systemc.uint<16>>, out1: !systemc.out<!systemc.uint<32>>, out2: !systemc.out<!systemc.uint<64>>)>, !systemc.signal<!systemc.uint<64>>
+// CHECK-NEXT:      systemc.instance.bind_port %inst1["out0"] to %inst1_out0_state{{.*}}
+// CHECK-NEXT:      systemc.instance.bind_port %inst1["out1"] to %inst1_out1_state{{.*}}
+// CHECK-NEXT:      systemc.instance.bind_port %inst1["out2"] to %inst1_out2_state{{.*}}
+// CHECK-NEXT:      systemc.instance.bind_port %inst2["in0"] to %inst1_out0_state{{.*}}
+// CHECK-NEXT:      systemc.instance.bind_port %inst2["in1"] to %inst1_out1_state{{.*}}
+// CHECK-NEXT:      systemc.instance.bind_port %inst2["out0"] to %inst2_out0_state{{.*}}
+// CHECK-NEXT:      systemc.instance.bind_port %inst2["out1"] to %inst2_out1_state{{.*}}
+// CHECK-NEXT:      systemc.instance.bind_port %inst2["out2"] to %inst2_out2_state{{.*}}
 // CHECK-NEXT:    }
 // CHECK-NEXT:    [[UPDATEFUNC]] = systemc.func  {
 // CHECK-NEXT:      [[V0:%.+]] = systemc.signal.read %port0 : !systemc.in<!systemc.uint<32>>
@@ -97,17 +97,17 @@ hw.module @instanceLowering (in %port0: i32, out out0: i16, out out1: i32, out o
 // CHECK-NEXT:      [[V3:%.+]] = systemc.convert %c0_i16 : (i16) -> !systemc.uint<16>
 // CHECK-NEXT:      systemc.signal.write %inst1_in0, [[V3]] : !systemc.signal<!systemc.uint<16>>
 // CHECK-NEXT:      systemc.signal.write %inst1_in1, [[V2]] : !systemc.signal<!systemc.uint<32>>
-// CHECK-NEXT:      [[V4:%.+]] = systemc.signal.read %inst1_out0 : !systemc.signal<!systemc.uint<16>>
+// CHECK:           [[V4:%.+]] = systemc.signal.read %inst1_out0_state : !systemc.signal<!systemc.uint<16>>
 // CHECK-NEXT:      [[V5:%.+]] = systemc.convert [[V4]] : (!systemc.uint<16>) -> i16
-// CHECK-NEXT:      [[V6:%.+]] = systemc.signal.read %inst1_out1 : !systemc.signal<!systemc.uint<32>>
+// CHECK:           [[V6:%.+]] = systemc.signal.read %inst1_out1_state : !systemc.signal<!systemc.uint<32>>
 // CHECK-NEXT:      [[V7:%.+]] = systemc.convert [[V6]] : (!systemc.uint<32>) -> i32
-// CHECK-NEXT:      [[V8:%.+]] = systemc.signal.read %inst1_out2 : !systemc.signal<!systemc.uint<64>>
+// CHECK:           [[V8:%.+]] = systemc.signal.read %inst1_out2_state : !systemc.signal<!systemc.uint<64>>
 // CHECK-NEXT:      [[V9:%.+]] = systemc.convert [[V8]] : (!systemc.uint<64>) -> i64
-// CHECK-NEXT:      [[V10:%.+]] = systemc.signal.read %inst2_out0 : !systemc.signal<!systemc.uint<16>>
+// CHECK:           [[V10:%.+]] = systemc.signal.read %inst2_out0_state : !systemc.signal<!systemc.uint<16>>
 // CHECK-NEXT:      [[V11:%.+]] = systemc.convert [[V10]] : (!systemc.uint<16>) -> i16
-// CHECK-NEXT:      [[V12:%.+]] = systemc.signal.read %inst2_out1 : !systemc.signal<!systemc.uint<32>>
+// CHECK:           [[V12:%.+]] = systemc.signal.read %inst2_out1_state : !systemc.signal<!systemc.uint<32>>
 // CHECK-NEXT:      [[V13:%.+]] = systemc.convert [[V12]] : (!systemc.uint<32>) -> i32
-// CHECK-NEXT:      [[V14:%.+]] = systemc.signal.read %inst2_out2 : !systemc.signal<!systemc.uint<64>>
+// CHECK:           [[V14:%.+]] = systemc.signal.read %inst2_out2_state : !systemc.signal<!systemc.uint<64>>
 // CHECK-NEXT:      [[V15:%.+]] = systemc.convert [[V14]] : (!systemc.uint<64>) -> i64
 // CHECK-NEXT:      [[V16:%.+]] = systemc.convert [[V11]] : (i16) -> !systemc.uint<16>
 // CHECK-NEXT:      systemc.signal.write %out0, [[V16]] : !systemc.out<!systemc.uint<16>>
