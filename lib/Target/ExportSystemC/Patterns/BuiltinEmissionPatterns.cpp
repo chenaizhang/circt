@@ -150,6 +150,14 @@ struct IntegerAttrEmitter : AttrEmissionPattern<IntegerAttr> {
 
       SmallString<128> strValue;
       val.toString(strValue, 10, isSigned);
+      // Native C++ integer literals cannot represent values wider than 64
+      // bits portably. SystemC arbitrary-width integers accept decimal
+      // strings, and HW constants of this width are always consumed through a
+      // SystemC conversion wrapper in the exporter.
+      if (!isSigned && val.getActiveBits() > 64) {
+        p << "\"" << strValue << "\"";
+        return;
+      }
       p << strValue;
       // An unsuffixed decimal literal equal to UINT64_MAX is commonly typed
       // as a compiler-specific 128-bit integer. SystemC's sc_biguint

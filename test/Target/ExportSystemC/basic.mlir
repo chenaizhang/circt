@@ -68,6 +68,10 @@ systemc.module @basic (%port0: !systemc.in<i1>, %port1: !systemc.inout<!systemc.
     %cmax_i192 = hw.constant 18446744073709551615 : i192
     %wide = systemc.convert %cmax_i192 : (i192) -> !systemc.bv<1024>
     systemc.signal.write %port3, %wide : !systemc.out<!systemc.bv<1024>>
+    // CHECK-NEXT: port3.write(sc_bv<1024>("6277101735386680763835789423207666416102355444464034512895"));
+    %callones_i192 = hw.constant 6277101735386680763835789423207666416102355444464034512895 : i192
+    %allones = systemc.convert %callones_i192 : (i192) -> !systemc.bv<1024>
+    systemc.signal.write %port3, %allones : !systemc.out<!systemc.bv<1024>>
     // CHECK-NEXT: testvar = 42;
     systemc.cpp.assign %testvar = %c42_i32 : i32
     // CHECK-NEXT: testvarwithinit = testvar;
