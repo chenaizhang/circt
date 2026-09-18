@@ -497,33 +497,33 @@ static Value findPreLoweredState(SCModuleOp module, StringAttr stateName) {
   return {};
 }
 
-// ExportSystemC represents combinational values as inline expressions.  A
-// packed mux/extract chain can otherwise duplicate the same expression at
-// every leaf and grow exponentially. Materialize shared aggregate values and
-// moderately wide aggregate glue once as C++ local variables. Existing comb
-// emitters still provide the initializer expression, while all later users
-// refer to a stable name.
-static void materializeAggregateValues(ModuleOp module) {
+// ExportSystemC represents combinational values as inline expressions. Even a
+// narrow value with a single immediate SSA use may feed a reconvergent graph
+// through another operation; recursively printing that graph can therefore
+// grow exponentially. Materialize every Comb result once as a C++ local
+// variable. Existing Comb emitters still provide the initializer expression,
+// while all later users refer to a stable name and emission remains linear in
+// the IR size.
+static void materializeCombValues(ModuleOp module) {
   module.walk([&](SCFuncOp func) {
-    SmallVector<Operation *> wideOps;
+    SmallVector<Operation *> combOps;
     func.walk([&](Operation *op) {
-      if (!isa<comb::ConcatOp, comb::MuxOp, comb::ExtractOp>(op) ||
-          op->getNumResults() != 1)
+      if (op->getName().getDialectNamespace() !=
+              comb::CombDialect::getDialectNamespace() ||
+          op->getNumResults() != 1 ||
+          !isa<IntegerType>(op->getResult(0).getType()))
         return;
-      auto integer = dyn_cast<IntegerType>(op->getResult(0).getType());
-      if (integer &&
-          (integer.getWidth() >= 128 || !op->getResult(0).hasOneUse()))
-        wideOps.push_back(op);
+      combOps.push_back(op);
     });
 
     unsigned nextName = 0;
-    for (Operation *op : wideOps) {
+    for (Operation *op : combOps) {
       if (!op->getBlock())
         continue;
       OpBuilder builder(op->getContext());
       builder.setInsertionPointAfter(op);
       auto name =
-          builder.getStringAttr("wide_tmp_" + std::to_string(nextName++));
+          builder.getStringAttr("comb_tmp_" + std::to_string(nextName++));
       unsigned width = cast<IntegerType>(op->getResult(0).getType()).getWidth();
       // Keep one-bit shared glue as a native boolean.  Materializing it as an
       // sc_bv<1> makes the later conversion back to i1 emit `bool(sc_bv<1>)`,
@@ -1642,5 +1642,5 @@ void HWToSystemCPass::runOnOperation() {
     return;
   }
 
-  materializeAggregateValues(module);
+  materializeCombValues(module);
 }

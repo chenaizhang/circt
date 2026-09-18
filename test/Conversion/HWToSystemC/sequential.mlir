@@ -107,6 +107,9 @@ hw.module @feedback_counter(in %clk: i1, in %reset: i1, out value: i8) {
 // CHECK: %[[STATE_READ:.*]] = systemc.signal.read %[[STATE_SIGNAL]]
 // CHECK: %[[CURRENT:.*]] = systemc.convert %[[STATE_READ]] : (!systemc.uint<8>) -> i8
 // CHECK: %[[NEXT:.*]] = comb.add {{.*}}, {{.*}} : i8
-// CHECK: %[[NEXT_SC:.*]] = systemc.convert %[[NEXT]] : (i8) -> !systemc.uint<8>
+// CHECK: %[[NEXT_BV:.*]] = systemc.convert %[[NEXT]] : (i8) -> !systemc.bv<8>
+// CHECK: %[[NEXT_VAR:.*]] = systemc.cpp.variable %[[NEXT_BV]] : !systemc.bv<8>
+// CHECK: %[[NEXT_INT:.*]] = systemc.convert %[[NEXT_VAR]] : (!systemc.bv<8>) -> i8
+// CHECK: %[[NEXT_SC:.*]] = systemc.convert %[[NEXT_INT]] : (i8) -> !systemc.uint<8>
 // CHECK: "systemc.register.write"(%[[STATE_SIGNAL]], %[[NEXT_SC]], %clk, %true, {{.*}}, {{.*}}) <{isAsync = false}>
 // CHECK-NOT: seq.

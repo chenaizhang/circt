@@ -34,7 +34,10 @@ hw.module @adder (in %a: i32, in %b: i32, out sum: i32) {
   // CHECK-NEXT:   [[B:%.+]] = systemc.signal.read %b : !systemc.in<!systemc.uint<32>>
   // CHECK-NEXT:   [[BC:%.+]] = systemc.convert [[B]] : (!systemc.uint<32>) -> i32
   // CHECK-NEXT:   [[RES:%.*]] = comb.add [[AC]], [[BC]] : i32
-  // CHECK-NEXT:   [[RESC:%.+]] = systemc.convert [[RES]] : (i32) -> !systemc.uint<32>
+  // CHECK-NEXT:   [[RES_BV:%.+]] = systemc.convert [[RES]] : (i32) -> !systemc.bv<32>
+  // CHECK-NEXT:   [[RES_VAR:%.+]] = systemc.cpp.variable [[RES_BV]] : !systemc.bv<32>
+  // CHECK-NEXT:   [[RES_INT:%.+]] = systemc.convert [[RES_VAR]] : (!systemc.bv<32>) -> i32
+  // CHECK-NEXT:   [[RESC:%.+]] = systemc.convert [[RES_INT]] : (i32) -> !systemc.uint<32>
   // CHECK-NEXT:   systemc.signal.write %sum, [[RESC]] : !systemc.out<!systemc.uint<32>>
   // CHECK-NEXT: }
   %0 = comb.add %a, %b : i32
