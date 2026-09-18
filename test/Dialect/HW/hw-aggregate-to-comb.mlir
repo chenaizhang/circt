@@ -225,3 +225,49 @@ hw.module @aggregate_feedback(in %clk : !seq.clock, in %enable : i1,
   %state = seq.compreg %next, %clk : !hw.array<4xi8>
   hw.output %state : !hw.array<4xi8>
 }
+
+// A fully assigned combinational array temporary may arrive as a graph-region
+// cycle. Every branch updates element 0 and the remaining elements are then
+// updated unconditionally, so the old array value is semantically irrelevant.
+// CHECK-LABEL: @fully_overwritten_array_feedback
+// CHECK-NOT: hw.array_inject
+// CHECK: comb.concat
+hw.module @fully_overwritten_array_feedback(in %sel : i1, in %a : i8,
+                                            in %b : i8, in %c : i8,
+                                            out value : !hw.array<3xi8>) {
+  %c0 = hw.constant 0 : i2
+  %c1 = hw.constant 1 : i2
+  %c2 = hw.constant 2 : i2
+  %set0a = hw.array_inject %final[%c0], %a : !hw.array<3xi8>, i2
+  %set0b = hw.array_inject %final[%c0], %b : !hw.array<3xi8>, i2
+  %set0 = comb.mux %sel, %set0a, %set0b : !hw.array<3xi8>
+  %set1 = hw.array_inject %set0[%c1], %b : !hw.array<3xi8>, i2
+  %final = hw.array_inject %set1[%c2], %c : !hw.array<3xi8>, i2
+  hw.output %final : !hw.array<3xi8>
+}
+
+// Generated function-output lowering may update a nested aggregate one scalar
+// at a time. A dynamically indexed constant lookup remains independent of the
+// feedback root, and every inner element of every outer element is overwritten.
+// CHECK-LABEL: @fully_overwritten_nested_array_feedback
+// CHECK-NOT: hw.array_{{get|inject}}
+// CHECK: comb.concat
+hw.module @fully_overwritten_nested_array_feedback(
+    in %sel : i1, in %a : i4, in %b : i4,
+    out value : !hw.array<2xarray<2xi4>>) {
+  %c0_i1 = hw.constant 0 : i1
+  %c1_i1 = hw.constant 1 : i1
+  %lookup = hw.array_create %a, %b : i4
+  %selected = hw.array_get %lookup[%sel] : !hw.array<2xi4>, i1
+
+  %inner0 = hw.array_get %final[%c0_i1] : !hw.array<2xarray<2xi4>>, i1
+  %inner0_set0 = hw.array_inject %inner0[%c0_i1], %selected : !hw.array<2xi4>, i1
+  %inner0_set1 = hw.array_inject %inner0_set0[%c1_i1], %a : !hw.array<2xi4>, i1
+  %outer0 = hw.array_inject %final[%c0_i1], %inner0_set1 : !hw.array<2xarray<2xi4>>, i1
+
+  %inner1 = hw.array_get %outer0[%c1_i1] : !hw.array<2xarray<2xi4>>, i1
+  %inner1_set0 = hw.array_inject %inner1[%c0_i1], %b : !hw.array<2xi4>, i1
+  %inner1_set1 = hw.array_inject %inner1_set0[%c1_i1], %selected : !hw.array<2xi4>, i1
+  %final = hw.array_inject %outer0[%c1_i1], %inner1_set1 : !hw.array<2xarray<2xi4>>, i1
+  hw.output %final : !hw.array<2xarray<2xi4>>
+}

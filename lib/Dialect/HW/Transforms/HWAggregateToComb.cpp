@@ -13,6 +13,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/SmallBitVector.h"
 
 namespace circt {
 namespace hw {
@@ -25,6 +26,324 @@ using namespace mlir;
 using namespace circt;
 
 namespace {
+
+static Attribute getZeroAttribute(Type type, Builder &builder) {
+  if (auto intType = hw::type_dyn_cast<IntegerType>(type))
+    return builder.getIntegerAttr(intType, 0);
+  if (auto arrayType = hw::type_dyn_cast<hw::ArrayType>(type)) {
+    Attribute element = getZeroAttribute(arrayType.getElementType(), builder);
+    return builder.getArrayAttr(
+        SmallVector<Attribute>(arrayType.getNumElements(), element));
+  }
+  if (auto structType = hw::type_dyn_cast<hw::StructType>(type)) {
+    SmallVector<Attribute> fields;
+    fields.reserve(structType.getElements().size());
+    for (auto field : structType.getElements())
+      fields.push_back(getZeroAttribute(field.type, builder));
+    return builder.getArrayAttr(fields);
+  }
+  return {};
+}
+
+/// Track which output bits of an aggregate expression still depend on a
+/// selected graph-cycle root. This is deliberately bit-accurate: generated
+/// code often updates a nested array by extracting one inner array, changing
+/// one element, and injecting it back into the outer array. Merely observing
+/// that the outer slot was injected would incorrectly classify that partial
+/// update as a complete overwrite.
+class AggregateRootDependencyAnalysis {
+public:
+  explicit AggregateRootDependencyAnalysis(Value root) : root(root) {}
+
+  FailureOr<llvm::SmallBitVector> analyzeRoot() {
+    return analyze(root, /*expandRoot=*/true);
+  }
+
+  SmallVector<OpOperand *> &getBackedges() { return backedges; }
+
+private:
+  FailureOr<llvm::SmallBitVector> analyzeOperand(OpOperand &operand) {
+    if (operand.get() == root ||
+        (visiting.contains(operand.get()) &&
+         operand.get().getType() == root.getType())) {
+      backedges.push_back(&operand);
+      int64_t width = hw::getBitWidth(operand.get().getType());
+      if (width < 0)
+        return failure();
+      return llvm::SmallBitVector(width, true);
+    }
+    return analyze(operand.get(), /*expandRoot=*/false);
+  }
+
+  FailureOr<llvm::SmallBitVector> analyze(Value value, bool expandRoot) {
+    int64_t width = hw::getBitWidth(value.getType());
+    if (width < 0)
+      return failure();
+    if (value == root && !expandRoot)
+      return llvm::SmallBitVector(width, true);
+    if (!expandRoot)
+      if (auto found = memo.find(value); found != memo.end())
+        return found->second;
+
+    Operation *def = value.getDefiningOp();
+    if (!def)
+      return llvm::SmallBitVector(width);
+    if (!visiting.insert(value).second)
+      return failure();
+
+    auto finish = [&](FailureOr<llvm::SmallBitVector> result) {
+      visiting.erase(value);
+      if (!expandRoot && succeeded(result))
+        memo.try_emplace(value, *result);
+      return result;
+    };
+    auto allDependent = [&]() {
+      return finish(llvm::SmallBitVector(width, true));
+    };
+
+    if (isa<hw::ConstantOp, hw::AggregateConstantOp>(def))
+      return finish(llvm::SmallBitVector(width));
+
+    // A register output is a state boundary. Its next-state and reset inputs
+    // may be printed later and may themselves depend on this combinational
+    // network, but those dependencies are not visible at the register output
+    // during the current evaluation.
+    if (isa<seq::CompRegOp, seq::CompRegClockEnabledOp, seq::FirRegOp>(def))
+      return finish(llvm::SmallBitVector(width));
+
+    if (auto inject = dyn_cast<hw::ArrayInjectOp>(def)) {
+      APInt index;
+      auto arrayType = hw::type_dyn_cast<hw::ArrayType>(value.getType());
+      if (!arrayType ||
+          !matchPattern(inject.getIndex(), m_ConstantInt(&index)) ||
+          !index.isSingleWord() ||
+          index.getZExtValue() >= arrayType.getNumElements())
+        return finish(failure());
+      auto base = analyzeOperand(inject.getInputMutable());
+      auto element = analyzeOperand(inject.getElementMutable());
+      if (failed(base) || failed(element))
+        return finish(failure());
+      int64_t elementWidth = hw::getBitWidth(arrayType.getElementType());
+      if (elementWidth < 0 || element->size() != size_t(elementWidth))
+        return finish(failure());
+      size_t offset = index.getZExtValue() * elementWidth;
+      for (size_t i = 0; i < size_t(elementWidth); ++i)
+        (*base)[offset + i] = (*element)[i];
+      return finish(std::move(base));
+    }
+
+    if (auto get = dyn_cast<hw::ArrayGetOp>(def)) {
+      APInt index;
+      auto arrayType = hw::type_dyn_cast<hw::ArrayType>(get.getInput().getType());
+      if (!arrayType)
+        return finish(failure());
+      auto input = analyzeOperand(get.getInputMutable());
+      if (failed(input) ||
+          input->size() != arrayType.getNumElements() * size_t(width))
+        return finish(failure());
+      if (matchPattern(get.getIndex(), m_ConstantInt(&index)) &&
+          index.isSingleWord() &&
+          index.getZExtValue() < arrayType.getNumElements()) {
+        size_t offset = index.getZExtValue() * width;
+        llvm::SmallBitVector result(width);
+        for (size_t i = 0; i < size_t(width); ++i)
+          result[i] = (*input)[offset + i];
+        return finish(std::move(result));
+      }
+
+      auto indexDependency = analyzeOperand(get->getOpOperand(1));
+      if (failed(indexDependency))
+        return finish(failure());
+      if (indexDependency->any())
+        return allDependent();
+
+      // For an index independent of the root, an output bit may come from the
+      // corresponding bit of any array element. Union those dependencies. In
+      // particular, dynamically indexing a root-independent constant array
+      // remains root-independent.
+      llvm::SmallBitVector result(width);
+      for (size_t element = 0; element < arrayType.getNumElements(); ++element)
+        for (size_t i = 0; i < size_t(width); ++i)
+          result[i] = result[i] || (*input)[element * width + i];
+      return finish(std::move(result));
+    }
+
+    if (auto slice = dyn_cast<hw::ArraySliceOp>(def)) {
+      APInt lowIndex;
+      auto inputType =
+          hw::type_dyn_cast<hw::ArrayType>(slice.getInput().getType());
+      if (!inputType ||
+          !matchPattern(slice.getLowIndex(), m_ConstantInt(&lowIndex)) ||
+          !lowIndex.isSingleWord())
+        return allDependent();
+      int64_t elementWidth = hw::getBitWidth(inputType.getElementType());
+      uint64_t offset = lowIndex.getZExtValue() * elementWidth;
+      auto input = analyzeOperand(slice->getOpOperand(0));
+      if (failed(input) || elementWidth < 0 || offset + width > input->size())
+        return finish(failure());
+      llvm::SmallBitVector result(width);
+      for (size_t i = 0; i < size_t(width); ++i)
+        result[i] = (*input)[offset + i];
+      return finish(std::move(result));
+    }
+
+    if (auto extract = dyn_cast<hw::StructExtractOp>(def)) {
+      auto structType =
+          hw::type_dyn_cast<hw::StructType>(extract.getInput().getType());
+      if (!structType)
+        return finish(failure());
+      int64_t totalWidth = hw::getBitWidth(structType);
+      int64_t consumedWidth = 0;
+      for (size_t i = 0; i < extract.getFieldIndex(); ++i) {
+        int64_t fieldWidth =
+            hw::getBitWidth(structType.getElements()[i].type);
+        if (fieldWidth < 0)
+          return finish(failure());
+        consumedWidth += fieldWidth;
+      }
+      int64_t offset = totalWidth - consumedWidth - width;
+      auto input = analyzeOperand(extract->getOpOperand(0));
+      if (failed(input) || offset < 0 || offset + width > int64_t(input->size()))
+        return finish(failure());
+      llvm::SmallBitVector result(width);
+      for (size_t i = 0; i < size_t(width); ++i)
+        result[i] = (*input)[offset + i];
+      return finish(std::move(result));
+    }
+
+    if (auto inject = dyn_cast<hw::StructInjectOp>(def)) {
+      auto structType = hw::type_dyn_cast<hw::StructType>(value.getType());
+      if (!structType)
+        return finish(failure());
+      int64_t consumedWidth = 0;
+      for (size_t i = 0; i < inject.getFieldIndex(); ++i) {
+        int64_t precedingWidth =
+            hw::getBitWidth(structType.getElements()[i].type);
+        if (precedingWidth < 0)
+          return finish(failure());
+        consumedWidth += precedingWidth;
+      }
+      int64_t fieldWidth =
+          hw::getBitWidth(structType.getElements()[inject.getFieldIndex()].type);
+      if (fieldWidth < 0)
+        return finish(failure());
+      int64_t offset = width - consumedWidth - fieldWidth;
+      auto base = analyzeOperand(inject->getOpOperand(0));
+      auto field = analyzeOperand(inject->getOpOperand(1));
+      if (failed(base) || failed(field) || offset < 0 ||
+          field->size() != size_t(fieldWidth))
+        return finish(failure());
+      for (size_t i = 0; i < size_t(fieldWidth); ++i)
+        (*base)[offset + i] = (*field)[i];
+      return finish(std::move(base));
+    }
+
+    if (auto mux = dyn_cast<comb::MuxOp>(def)) {
+      auto condition = analyzeOperand(mux->getOpOperand(0));
+      auto trueResult = analyzeOperand(mux->getOpOperand(1));
+      auto falseResult = analyzeOperand(mux->getOpOperand(2));
+      if (failed(condition) || failed(trueResult) || failed(falseResult))
+        return finish(failure());
+      if (condition->any())
+        return allDependent();
+      *trueResult |= *falseResult;
+      return finish(std::move(trueResult));
+    }
+
+    if (auto bitcast = dyn_cast<hw::BitcastOp>(def)) {
+      auto input = analyzeOperand(bitcast->getOpOperand(0));
+      if (failed(input) || input->size() != size_t(width))
+        return finish(failure());
+      return finish(std::move(input));
+    }
+
+    if (isa<hw::ArrayCreateOp, hw::ArrayConcatOp, hw::StructCreateOp>(def)) {
+      llvm::SmallBitVector result(width);
+      size_t offset = width;
+      for (OpOperand &operand : def->getOpOperands()) {
+        auto element = analyzeOperand(operand);
+        if (failed(element) || element->size() > offset)
+          return finish(failure());
+        offset -= element->size();
+        for (size_t i = 0; i < element->size(); ++i)
+          result[offset + i] = (*element)[i];
+      }
+      return finish(std::move(result));
+    }
+
+    // Conservatively handle the remaining scalar and aggregate operations.
+    // If none of their operands depends on the root, neither does the result;
+    // otherwise assume every result bit may depend on it.
+    for (OpOperand &operand : def->getOpOperands()) {
+      auto dependency = analyzeOperand(operand);
+      if (failed(dependency))
+        return finish(failure());
+      if (dependency->any())
+        return allDependent();
+    }
+    return finish(llvm::SmallBitVector(width));
+  }
+
+  Value root;
+  SmallPtrSet<Value, 16> visiting;
+  DenseMap<Value, llvm::SmallBitVector> memo;
+  SmallVector<OpOperand *> backedges;
+};
+
+/// Slang may lower a completely assigned combinational array temporary into
+/// a graph-region feedback cycle. Each `hw.array_inject` keeps the untouched
+/// elements from the eventual result even though one pass through the chain
+/// overwrites every element. Prove that property across every mux branch and
+/// replace only the feedback operands reached during the proof with a zero
+/// base. Partial updates are deliberately left untouched since they can
+/// represent a latch or a real combinational loop.
+static void breakFullyOverwrittenArrayCycles(Operation *root) {
+  bool changed;
+  do {
+    changed = false;
+    root->walk([&](Operation *op) {
+      if (op->getNumResults() != 1)
+        return;
+      Value result = op->getResult(0);
+      auto arrayType = hw::type_dyn_cast<hw::ArrayType>(result.getType());
+      if (!arrayType || arrayType.getNumElements() == 0)
+        return;
+
+      // Every cycle in a single-block data-flow graph contains at least one
+      // backward edge. Select only the producer on that edge: its result is
+      // used by an operation printed before the producer. Selecting consumers
+      // merely because one operand is defined later includes most nodes in a
+      // large update chain and repeatedly analyzes the same graph.
+      bool participatesInForwardReference =
+          llvm::any_of(result.getUses(), [&](OpOperand &use) {
+            Operation *owner = use.getOwner();
+            return owner->getBlock() == op->getBlock() &&
+                   owner->isBeforeInBlock(op);
+          });
+      if (!participatesInForwardReference)
+        return;
+
+      if (!isa<hw::ArrayInjectOp, comb::MuxOp>(op))
+        return;
+
+      AggregateRootDependencyAnalysis analysis(result);
+      auto dependency = analysis.analyzeRoot();
+      auto &backedges = analysis.getBackedges();
+      if (failed(dependency) || backedges.empty() || dependency->any())
+        return;
+
+      OpBuilder builder(op);
+      Attribute zero = getZeroAttribute(arrayType, builder);
+      if (!zero)
+        return;
+      Value zeroArray = hw::AggregateConstantOp::create(
+          builder, op->getLoc(), arrayType, cast<ArrayAttr>(zero));
+      for (OpOperand *backedge : backedges)
+        backedge->set(zeroArray);
+      changed = true;
+    });
+  } while (changed);
+}
 
 // Lower hw.array_create and hw.array_concat to comb.concat.
 template <typename OpTy>
@@ -118,6 +437,26 @@ struct HWArrayInjectOpConversion : OpConversionPattern<hw::ArrayInjectOp> {
     for (size_t i = 0; i < numElements; ++i) {
       originalElements.push_back(rewriter.createOrFold<comb::ExtractOp>(
           loc, inputArray, i * elemWidth, elemWidth));
+    }
+
+    // A constant index needs only one rebuilt array. The generic dynamic
+    // lowering below constructs every possible row of an N x N array before
+    // selecting one; doing that for the constant-index update chains emitted
+    // by frontends causes a quadratic IR blow-up, which compounds badly for
+    // nested arrays. Array element 0 occupies the LSBs, so concatenate the
+    // rebuilt elements in reverse order.
+    APInt constantIndex;
+    if (matchPattern(adaptor.getIndex(), m_ConstantInt(&constantIndex)) &&
+        constantIndex.isSingleWord() &&
+        constantIndex.getZExtValue() < numElements) {
+      uint64_t injectIndex = constantIndex.getZExtValue();
+      SmallVector<Value> elements;
+      elements.reserve(numElements);
+      for (int64_t i = numElements - 1; i >= 0; --i)
+        elements.push_back(i == int64_t(injectIndex) ? adaptor.getElement()
+                                                     : originalElements[i]);
+      rewriter.replaceOpWithNewOp<comb::ConcatOp>(op, elements);
+      return success();
     }
 
     // Create 2D array: each row represents what the array would look like
@@ -544,6 +883,8 @@ struct HWAggregateToCombPass
 } // namespace
 
 void HWAggregateToCombPass::runOnOperation() {
+  breakFullyOverwrittenArrayCycles(getOperation());
+
   ConversionTarget target(getContext());
 
   target.addIllegalOp<hw::ArrayGetOp, hw::ArrayCreateOp, hw::ArrayConcatOp,
@@ -563,14 +904,7 @@ void HWAggregateToCombPass::runOnOperation() {
   AggregateTypeConverter typeConverter;
   populateHWAggregateToCombOpConversionPatterns(patterns, typeConverter);
 
-  ConversionConfig conversionConfig;
-  // Aggregate registers commonly participate in feedback loops. Commit each
-  // scalarizing rewrite immediately so cyclic users can observe the rebuilt
-  // value instead of leaving the conversion driver with an unresolved SCC of
-  // delayed replacement placeholders.
-  conversionConfig.allowPatternRollback = false;
   if (failed(mlir::applyPartialConversion(getOperation(), target,
-                                          std::move(patterns),
-                                          conversionConfig)))
+                                          std::move(patterns))))
     return signalPassFailure();
 }
